@@ -70,3 +70,6 @@ The installer will:
 - create a desktop shortcut,
 - include the `probe_xmls` folder with default probe XML files,
 - launch pyNeuroscope after installation.
+
+GitHub Releases also include `pyNeuroscope-Windows.zip` as a portable distribution.
+Use this zip if you prefer not to run the installer; extract the archive and run `pyNeuroscope.exe` from the unpacked `pyNeuroscope` folder.
