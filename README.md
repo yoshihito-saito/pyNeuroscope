@@ -1,6 +1,6 @@
 # pyNeuroscope
 
-pyNeuroscope is a Python desktop app for inspecting NeuroScope-style electrophysiology recordings and creating NeuroSuite / Neurocode-compatible `amplifier.xml` files.
+pyNeuroscope is a Python desktop app inspired by NeuroScope for inspecting electrophysiology recordings and creating NeuroSuite / Neurocode-compatible `amplifier.xml` files.
 
 It is designed for quick visual checks of `amplifier.dat`, channel grouping, bad-channel marking, color-map assignment, and XML export for downstream preprocessing workflows.
 
@@ -73,3 +73,10 @@ The installer will:
 
 GitHub Releases also include `pyNeuroscope-Windows.zip` as a portable distribution.
 Use this zip if you prefer not to run the installer; extract the archive and run `pyNeuroscope.exe` from the unpacked `pyNeuroscope` folder.
+
+## License
+
+`pyNeuroscope` is distributed under the MIT License. See [LICENSE](LICENSE).
+
+Bundled and runtime third-party dependencies are licensed separately. See
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
