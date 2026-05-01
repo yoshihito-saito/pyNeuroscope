@@ -242,14 +242,24 @@ class SignalViewer(QWidget):
         if not regions:
             return None
         left_px, right_px = sorted((x1, x2))
-        best_region: tuple[float, float] | None = None
-        best_overlap = 0.0
+        start_region = self._region_containing_x(x1, regions)
+        if start_region is not None:
+            left = self._fraction_in_region(left_px, start_region)
+            right = self._fraction_in_region(right_px, start_region)
+            return tuple(sorted((left, right)))
+
+        fractions: list[float] = []
         for region in regions:
             overlap = min(right_px, region[1]) - max(left_px, region[0])
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_region = region
-        if best_region is None or best_overlap < 4:
+            if overlap >= 4:
+                fractions.append(self._fraction_in_region(max(left_px, region[0]), region))
+                fractions.append(self._fraction_in_region(min(right_px, region[1]), region))
+        if fractions:
+            return min(fractions), max(fractions)
+
+        if len(regions) == 1:
+            best_region = regions[0]
+        else:
             center = (left_px + right_px) / 2.0
             best_region = min(
                 regions,
@@ -260,6 +270,16 @@ class SignalViewer(QWidget):
         left = self._fraction_in_region(left_px, best_region)
         right = self._fraction_in_region(right_px, best_region)
         return tuple(sorted((left, right)))
+
+    def _region_containing_x(
+        self,
+        x_position: float,
+        regions: list[tuple[float, float]],
+    ) -> tuple[float, float] | None:
+        for region in regions:
+            if region[0] <= x_position <= region[1]:
+                return region
+        return None
 
     def _trace_x_regions(self) -> list[tuple[float, float]]:
         if not self._layout_items:

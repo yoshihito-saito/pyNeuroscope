@@ -740,10 +740,10 @@ class MainWindow(QMainWindow):
         recording_duration = self._current_recording_duration_seconds()
         if recording_duration is not None:
             new_duration = min(new_duration, max(0.001, recording_duration))
-        center = self._window_start_seconds() + old_duration / 2.0
+        start = self._window_start_seconds()
         max_start = max(0.0, (recording_duration or float("inf")) - new_duration)
         self._set_window_duration_seconds(new_duration)
-        self._set_window_start_seconds(max(0.0, min(max_start, center - new_duration / 2.0)))
+        self._set_window_start_seconds(max(0.0, min(max_start, start)))
         self._load_window(silent=True)
 
     def _scroll_traces(self, delta_pixels: int) -> None:

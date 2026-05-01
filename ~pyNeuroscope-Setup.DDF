@@ -1,0 +1,23 @@
+;Auto-generated Diamond Directive File. Can be deleted without harm.
+.Set CabinetNameTemplate=D:\pyNeuroscope\~pyNeuroscope-Setup.CAB
+.Set CompressionType=LZX
+.Set CompressionLevel=7
+.Set InfFileName=D:\pyNeuroscope\~pyNeuroscope-Setup_LAYOUT.INF
+.Set RptFileName=D:\pyNeuroscope\~pyNeuroscope-Setup.RPT
+.Set MaxDiskSize=CDROM
+.Set ReservePerCabinetSize=0
+.Set InfCabinetLineFormat=*cab#*=Application Source Media,*cabfile*,0
+.Set Compress=on
+.Set CompressionMemory=21
+.Set DiskDirectoryTemplate=
+.Set Cabinet=ON
+.Set MaxCabinetSize=999999999
+.Set InfDiskHeader=
+.Set InfDiskLineFormat=
+.Set InfCabinetHeader=[SourceDisksNames]
+.Set InfFileHeader=
+.Set InfFileHeader1=[SourceDisksFiles]
+.Set InfFileLineFormat=*file*=*cab#*,,*size*,*csum*
+"D:\pyNeuroscope\build\installer_payload\pyNeuroscope-Windows.zip"
+"D:\pyNeuroscope\build\installer_payload\install_pyneuroscope.ps1"
+"D:\pyNeuroscope\build\installer_payload\install.cmd"
