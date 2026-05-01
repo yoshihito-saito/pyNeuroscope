@@ -1,0 +1,84 @@
+[
+  {
+    "vendor": "Custom",
+    "model": "Linear",
+    "n_channels": null,
+    "grouping": "linear"
+  },
+  {
+    "vendor": "Custom",
+    "model": "Tetrode",
+    "n_channels": null,
+    "grouping": "tetrode"
+  },
+  {
+    "vendor": "Custom",
+    "model": "Fixed Shank",
+    "n_channels": null,
+    "grouping": "fixed_shank"
+  },
+  {
+    "vendor": "NeuroNexus",
+    "model": "A1x32-Poly2-5mm-50s-177 draft",
+    "n_channels": 32,
+    "draft": true,
+    "groups": [
+      {
+        "name": "shank1",
+        "channels": [0, 1, 2, 3, 4, 5, 6, 7]
+      },
+      {
+        "name": "shank2",
+        "channels": [8, 9, 10, 11, 12, 13, 14, 15]
+      },
+      {
+        "name": "shank3",
+        "channels": [16, 17, 18, 19, 20, 21, 22, 23]
+      },
+      {
+        "name": "shank4",
+        "channels": [24, 25, 26, 27, 28, 29, 30, 31]
+      }
+    ]
+  },
+  {
+    "vendor": "Cambridge NeuroTech",
+    "model": "ASSY-37 H6 draft",
+    "n_channels": 64,
+    "draft": true,
+    "groups": [
+      {
+        "name": "shank1",
+        "channels": [0, 1, 2, 3, 4, 5, 6, 7]
+      },
+      {
+        "name": "shank2",
+        "channels": [8, 9, 10, 11, 12, 13, 14, 15]
+      },
+      {
+        "name": "shank3",
+        "channels": [16, 17, 18, 19, 20, 21, 22, 23]
+      },
+      {
+        "name": "shank4",
+        "channels": [24, 25, 26, 27, 28, 29, 30, 31]
+      },
+      {
+        "name": "shank5",
+        "channels": [32, 33, 34, 35, 36, 37, 38, 39]
+      },
+      {
+        "name": "shank6",
+        "channels": [40, 41, 42, 43, 44, 45, 46, 47]
+      },
+      {
+        "name": "shank7",
+        "channels": [48, 49, 50, 51, 52, 53, 54, 55]
+      },
+      {
+        "name": "shank8",
+        "channels": [56, 57, 58, 59, 60, 61, 62, 63]
+      }
+    ]
+  }
+]

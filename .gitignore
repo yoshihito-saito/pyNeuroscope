@@ -1,0 +1,39 @@
+__pycache__/
+*.py[cod]
+
+# Local planning notes and large/private demo data
+IMPLEMENTATION.md
+demo/
+
+# Python build/test artifacts
+.pytest_cache/
+.pytest_tmp/
+pytest-cache-files-*/
+tests/_tmp_data/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments and local environment variables
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+env/
+
+# IDE/editor local state
+.idea/
+.vscode/
+*.code-workspace
+
+# OS and local runtime files
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+tests/
