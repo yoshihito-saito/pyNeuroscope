@@ -1,23 +1,5 @@
 [
   {
-    "vendor": "Custom",
-    "model": "Linear",
-    "n_channels": null,
-    "grouping": "linear"
-  },
-  {
-    "vendor": "Custom",
-    "model": "Tetrode",
-    "n_channels": null,
-    "grouping": "tetrode"
-  },
-  {
-    "vendor": "Custom",
-    "model": "Fixed Shank",
-    "n_channels": null,
-    "grouping": "fixed_shank"
-  },
-  {
     "vendor": "NeuroNexus",
     "model": "A1x32-Poly2-5mm-50s-177 draft",
     "n_channels": 32,

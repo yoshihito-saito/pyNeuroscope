@@ -12,8 +12,8 @@ class RecordingMetadata:
     lfp_sampling_rate: float = 0.0
     dtype: str = "int16"
     n_bits: int | None = 16
-    voltage_range: float | None = None
-    amplification: float | None = None
+    voltage_range: float | None = 20.0
+    amplification: float | None = 1000.0
     offset: float = 0.0
     least_significant_bit: float | None = None
     duration_seconds: float | None = None

@@ -70,6 +70,7 @@ def validate_settings(
                 groups,
                 bad,
                 metadata=recording,
+                channel_colors=colors,
             )
             parse_xml_text(xml_text if xml_text is not None else generated)
         except XmlError as exc:

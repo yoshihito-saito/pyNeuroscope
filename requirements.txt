@@ -1,4 +1,5 @@
 numpy
 PySide6
 pyqtgraph
+scipy
 pytest

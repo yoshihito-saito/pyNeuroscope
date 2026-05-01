@@ -4,6 +4,7 @@ from pathlib import Path
 from xml.dom import minidom
 from xml.etree import ElementTree as ET
 
+from .color_map import validate_color
 from .models import ChannelGroup, RecordingMetadata
 
 
@@ -37,6 +38,7 @@ def build_neurocode_xml(
     bad_channels: set[int] | None = None,
     *,
     metadata: RecordingMetadata | None = None,
+    channel_colors: dict[int, str] | None = None,
     emit_skip_attribute: bool = True,
 ) -> str:
     if n_channels <= 0:
@@ -75,7 +77,29 @@ def build_neurocode_xml(
             if emit_skip_attribute:
                 channel_el.set("skip", "1" if channel in bad else "0")
             channel_el.text = str(channel)
+
+    if channel_colors:
+        _append_neuroscope_channel_colors(root, n_channels, channel_colors)
     return pretty_xml(root)
+
+
+def _append_neuroscope_channel_colors(
+    root: ET.Element,
+    n_channels: int,
+    channel_colors: dict[int, str],
+) -> None:
+    neuroscope = ET.SubElement(root, "neuroscope")
+    channels_el = ET.SubElement(neuroscope, "channels")
+    for channel in range(n_channels):
+        color = validate_color(channel_colors.get(channel, "#ff00ff"))
+        colors_el = ET.SubElement(channels_el, "channelColors")
+        _text(colors_el, "channel", channel)
+        _text(colors_el, "color", color)
+        _text(colors_el, "anatomyColor", color)
+        _text(colors_el, "spikeColor", color)
+        offset_el = ET.SubElement(channels_el, "channelOffset")
+        _text(offset_el, "channel", channel)
+        _text(offset_el, "defaultOffset", 0)
 
 
 def parse_neurosuite_xml(path_or_text: str | Path) -> tuple[RecordingMetadata, list[ChannelGroup], set[int]]:

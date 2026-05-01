@@ -21,7 +21,14 @@ def dtype_from_name(dtype: str) -> np.dtype:
     return result
 
 
-def inspect_dat(path: str | Path, n_channels: int, sampling_rate: float, dtype: str = "int16") -> DatInfo:
+def inspect_dat(
+    path: str | Path,
+    n_channels: int,
+    sampling_rate: float,
+    dtype: str = "int16",
+    *,
+    allow_trailing_bytes: bool = False,
+) -> DatInfo:
     dat_path = Path(path)
     if not dat_path.exists():
         raise DatReaderError(f"DAT file does not exist: {dat_path}")
@@ -35,7 +42,8 @@ def inspect_dat(path: str | Path, n_channels: int, sampling_rate: float, dtype: 
     frame_bytes = int(n_channels) * int(np_dtype.itemsize)
     if frame_bytes <= 0:
         raise DatReaderError("Frame size must be positive")
-    if file_size % frame_bytes != 0:
+    trailing_bytes = file_size % frame_bytes
+    if trailing_bytes != 0 and not allow_trailing_bytes:
         raise DatReaderError(
             f"File size {file_size} is not divisible by frame size {frame_bytes}"
         )
@@ -102,8 +110,9 @@ def read_dat_window(
     dtype: str = "int16",
     *,
     clip: bool = True,
+    allow_trailing_bytes: bool = False,
 ) -> DatWindow:
-    info = inspect_dat(path, n_channels, sampling_rate, dtype)
+    info = inspect_dat(path, n_channels, sampling_rate, dtype, allow_trailing_bytes=allow_trailing_bytes)
     np_dtype = dtype_from_name(dtype)
     start_frame, frames_to_read, clipped = compute_window_bounds(
         info.total_frames,

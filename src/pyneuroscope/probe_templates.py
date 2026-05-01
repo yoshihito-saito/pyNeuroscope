@@ -34,18 +34,14 @@ def parse_templates(raw_templates: Iterable[dict]) -> list[ProbeTemplate]:
         if n_channels is not None and (not isinstance(n_channels, int) or n_channels <= 0):
             raise ProbeTemplateError(f"Template {vendor} {model} has invalid n_channels")
         groups = [_parse_group(group, i) for i, group in enumerate(raw.get("groups", []))]
-        grouping = raw.get("grouping")
-        if grouping is not None and grouping not in {"linear", "tetrode", "fixed_shank"}:
-            raise ProbeTemplateError(f"Template {vendor} {model} has invalid grouping")
-        if not groups and grouping is None:
-            raise ProbeTemplateError(f"Template {vendor} {model} needs groups or grouping")
+        if not groups:
+            raise ProbeTemplateError(f"Template {vendor} {model} needs groups")
         templates.append(
             ProbeTemplate(
                 vendor=vendor,
                 model=model,
                 n_channels=n_channels,
                 groups=groups,
-                grouping=grouping,
                 draft=bool(raw.get("draft", False)),
             )
         )
@@ -65,28 +61,38 @@ def models_for_vendor(templates: Iterable[ProbeTemplate], vendor: str) -> list[P
     return [template for template in templates if template.vendor == vendor]
 
 
-def generate_linear_groups(n_channels: int) -> list[ChannelGroup]:
-    _require_positive_channels(n_channels)
-    return [ChannelGroup("group1", list(range(n_channels)))]
-
-
-def generate_tetrode_groups(n_channels: int) -> list[ChannelGroup]:
-    return generate_fixed_size_groups(n_channels, 4, prefix="tetrode")
-
-
-def generate_fixed_size_groups(
+def generate_sequential_shank_groups(
     n_channels: int,
-    channels_per_group: int,
+    n_probes: int,
+    shanks_per_probe: int,
+    channels_per_shank: int,
     *,
-    prefix: str = "shank",
+    start_channel: int = 0,
 ) -> list[ChannelGroup]:
     _require_positive_channels(n_channels)
-    if channels_per_group <= 0:
-        raise ProbeTemplateError("channels_per_group must be positive")
+    if n_probes <= 0:
+        raise ProbeTemplateError("n_probes must be positive")
+    if shanks_per_probe <= 0:
+        raise ProbeTemplateError("shanks_per_probe must be positive")
+    if channels_per_shank <= 0:
+        raise ProbeTemplateError("channels_per_shank must be positive")
+    if start_channel < 0 or start_channel >= n_channels:
+        raise ProbeTemplateError("start_channel must be a valid channel index")
+
     groups: list[ChannelGroup] = []
-    for start in range(0, n_channels, channels_per_group):
-        end = min(n_channels, start + channels_per_group)
-        groups.append(ChannelGroup(f"{prefix}{len(groups) + 1}", list(range(start, end))))
+    next_channel = start_channel
+    for probe_index in range(n_probes):
+        for shank_index in range(shanks_per_probe):
+            if next_channel >= n_channels:
+                return groups
+            end_channel = min(n_channels, next_channel + channels_per_shank)
+            groups.append(
+                ChannelGroup(
+                    f"probe{probe_index + 1}_shank{shank_index + 1}",
+                    list(range(next_channel, end_channel)),
+                )
+            )
+            next_channel = end_channel
     return groups
 
 

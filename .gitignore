@@ -4,6 +4,7 @@ __pycache__/
 # Local planning notes and large/private demo data
 IMPLEMENTATION.md
 demo/
+dev_data/
 
 # Python build/test artifacts
 .pytest_cache/
@@ -37,3 +38,4 @@ Thumbs.db
 *.log
 *.tmp
 tests/
+scripts/

@@ -11,7 +11,11 @@ dependencies = [
   "numpy",
   "PySide6",
   "pyqtgraph",
+  "scipy",
 ]
+
+[project.scripts]
+pyneuroscope = "pyneuroscope.app:main"
 
 [project.optional-dependencies]
 test = [
