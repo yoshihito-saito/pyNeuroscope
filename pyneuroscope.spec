@@ -2,7 +2,10 @@
 
 block_cipher = None
 
-datas = [("src/pyneuroscope/resources/probe_templates.json", "pyneuroscope/resources")]
+datas = [
+    ("src/pyneuroscope/resources/probe_templates.json", "pyneuroscope/resources"),
+    ("logo/logo.ico", "pyneuroscope/resources"),
+]
 
 a = Analysis(
     ["pyneuroscope_launcher.py"],
@@ -49,6 +52,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon="logo/logo.ico",
 )
 coll = COLLECT(
     exe,

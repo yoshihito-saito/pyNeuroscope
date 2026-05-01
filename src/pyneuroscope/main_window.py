@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from importlib.resources import files
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
@@ -48,6 +50,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("pyNeuroscope")
+        self.setWindowIcon(QIcon(str(files("pyneuroscope.resources").joinpath("logo.ico"))))
         self.resize(1280, 820)
         self.groups: list[ChannelGroup] = []
         self.group_designs: list[GroupDesign] = []

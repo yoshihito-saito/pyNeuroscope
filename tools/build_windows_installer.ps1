@@ -22,6 +22,7 @@ python -m PyInstaller `
     --onefile `
     --windowed `
     --name pyNeuroscope-Setup `
+    --icon logo\logo.ico `
     --add-data "$zipPath;." `
     tools\install_pyneuroscope.py
 
