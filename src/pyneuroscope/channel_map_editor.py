@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QTabWidget,
@@ -196,8 +197,11 @@ class ChannelMapDialog(QDialog):
         add_group.clicked.connect(self._add_group)
         remove_group = QPushButton("Remove Group")
         remove_group.clicked.connect(self._remove_current_group)
+        help_button = QPushButton("Help")
+        help_button.clicked.connect(self._show_help)
         buttons.addWidget(add_group)
         buttons.addWidget(remove_group)
+        buttons.addWidget(help_button)
         buttons.addStretch(1)
 
         dialog_buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Apply | QDialogButtonBox.StandardButton.Cancel)
@@ -232,3 +236,18 @@ class ChannelMapDialog(QDialog):
         for index, design in enumerate(self.designs):
             display_name = f"G{index + 1}"
             self.tabs.addTab(GroupTab(design, self.n_channels, self.channel_colors, display_name), display_name)
+
+    def _show_help(self) -> None:
+        QMessageBox.information(
+            self,
+            "How to Edit Channel Groups",
+            "\n".join(
+                [
+                    "Each tab is one group/shank.",
+                    "Click a site to set its channel number.",
+                    "Use channels/group to change how many sites are shown in the current group.",
+                    "Use + Group or Remove Group to change the number of groups.",
+                    "Press Apply when the channel layout matches your probe.",
+                ]
+            ),
+        )

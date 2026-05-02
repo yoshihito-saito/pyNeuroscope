@@ -38,6 +38,9 @@ Thumbs.db
 *.log
 *.tmp
 tests/
+!tests/
+!tests/test_anatomical_map.py
+!tests/test_brain_region_editor.py
 scripts/
 PACKAGING.md
 pyNeuroscope-Windows.zip

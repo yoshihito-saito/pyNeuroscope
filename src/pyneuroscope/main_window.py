@@ -24,10 +24,13 @@ from PySide6.QtWidgets import (
     QScrollBar,
     QSpinBox,
     QSplitter,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from .anatomical_map import AnatomicalMapError, build_anatomical_map_csv, load_anatomical_map_csv
+from .brain_region_editor import BrainRegionEditorDialog
 from .color_map import (
     COLOR_MAP_NAMES,
     ColorMapError,
@@ -56,6 +59,7 @@ class MainWindow(QMainWindow):
         self.group_designs: list[GroupDesign] = []
         self.bad_channels: set[int] = set()
         self.channel_colors: dict[int, str] = {}
+        self.channel_regions: dict[int, str] = {}
         self.loaded_metadata = RecordingMetadata()
         self.row_spacing = 1.0
         self._updating_time_scroll = False
@@ -104,6 +108,15 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         panel.setMaximumWidth(300)
         panel.setMinimumWidth(260)
+        layout = QVBoxLayout(panel)
+        tabs = QTabWidget()
+        tabs.addTab(self._build_recording_tab(), "Recording")
+        tabs.addTab(self._build_brain_regions_tab(), "Brain Regions")
+        layout.addWidget(tabs, 1)
+        return panel
+
+    def _build_recording_tab(self) -> QWidget:
+        panel = QWidget()
         layout = QVBoxLayout(panel)
         form = QFormLayout()
 
@@ -210,6 +223,25 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._build_filter_panel())
         layout.addStretch(1)
         layout.addWidget(shortcuts)
+        return panel
+
+    def _build_brain_regions_tab(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        open_editor = QPushButton("Add Brain Regions")
+        open_editor.clicked.connect(self._edit_brain_regions)
+        save_csv = QPushButton("Save anatomical_map.csv")
+        save_csv.clicked.connect(self._save_anatomical_map)
+        load_csv = QPushButton("Load anatomical_map.csv")
+        load_csv.clicked.connect(self._load_anatomical_map)
+        self.region_summary = QLabel("No regions assigned")
+        self.region_summary.setWordWrap(True)
+
+        layout.addWidget(open_editor)
+        layout.addWidget(load_csv)
+        layout.addWidget(save_csv)
+        layout.addWidget(self.region_summary)
+        layout.addStretch(1)
         return panel
 
     def _build_filter_panel(self) -> QWidget:
@@ -339,6 +371,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         self._load_adjacent_xml_if_present(Path(path))
+        self._load_adjacent_anatomical_map_if_present(Path(path))
         self._load_window(silent=True)
 
     def _load_xml(self) -> None:
@@ -370,11 +403,108 @@ class MainWindow(QMainWindow):
         self.group_designs = group_designs_from_groups(groups)
         self.bad_channels = bad
         self.bad_channels_text.setText(", ".join(str(ch) for ch in sorted(bad)))
+        dat_path = self.dat_path.text().strip()
+        if dat_path:
+            self._load_adjacent_anatomical_map_if_present(Path(dat_path))
+        else:
+            self.channel_regions = {}
         self._reset_colors()
+        self._refresh_region_summary()
         self._refresh_all()
         self._load_window(silent=True)
         if show_status:
             self.statusBar().showMessage(f"Loaded XML metadata: {path.name}", 5000)
+
+    def _edit_brain_regions(self) -> None:
+        dialog = BrainRegionEditorDialog(self.groups, self.channel_regions, self.channel_colors, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.channel_regions = dialog.channel_regions
+        self._refresh_region_summary()
+
+    def _default_anatomical_map_path(self) -> Path:
+        path = self.dat_path.text().strip()
+        if path:
+            return Path(path).parent / "anatomical_map.csv"
+        return Path("anatomical_map.csv")
+
+    def _save_anatomical_map(self) -> None:
+        if not self.groups:
+            QMessageBox.information(self, "Brain Regions", "Define channel groups before saving an anatomical map.")
+            return
+        default = str(self._default_anatomical_map_path())
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save anatomical_map.csv",
+            default,
+            "CSV files (*.csv);;All files (*)",
+        )
+        if not path:
+            return
+        save_path = Path(path)
+        if save_path.exists():
+            answer = QMessageBox.question(
+                self,
+                "Overwrite anatomical_map.csv?",
+                f"{save_path.name} already exists.\nOverwrite this CSV file?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        save_path.write_text(build_anatomical_map_csv(self.groups, self.channel_regions), encoding="utf-8")
+        self.statusBar().showMessage(f"Saved anatomical map: {save_path.name}", 5000)
+
+    def _load_anatomical_map(self) -> None:
+        if not self.groups:
+            QMessageBox.information(self, "Brain Regions", "Load or define channel groups before loading an anatomical map.")
+            return
+        default = str(self._default_anatomical_map_path())
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load anatomical_map.csv",
+            default,
+            "CSV files (*.csv);;All files (*)",
+        )
+        if not path:
+            return
+        try:
+            self.channel_regions = load_anatomical_map_csv(path, self.groups)
+        except AnatomicalMapError as exc:
+            QMessageBox.critical(self, "Brain Regions", str(exc))
+            return
+        self._refresh_region_summary()
+        self.statusBar().showMessage(f"Loaded anatomical map: {Path(path).name}", 5000)
+
+    def _load_adjacent_anatomical_map_if_present(self, dat_path: Path) -> None:
+        csv_path = dat_path.parent / "anatomical_map.csv"
+        if not self.groups:
+            self.channel_regions = {}
+            self._refresh_region_summary()
+            return
+        if not csv_path.exists():
+            self.channel_regions = {}
+            self._refresh_region_summary()
+            return
+        try:
+            self.channel_regions = load_anatomical_map_csv(csv_path, self.groups)
+        except AnatomicalMapError:
+            self.channel_regions = {}
+        self._refresh_region_summary()
+
+    def _refresh_region_summary(self) -> None:
+        if not hasattr(self, "region_summary"):
+            return
+        counts: dict[str, int] = {}
+        for label in self.channel_regions.values():
+            clean = label.strip()
+            if clean:
+                counts[clean] = counts.get(clean, 0) + 1
+        if not counts:
+            self.region_summary.setText("No regions assigned")
+            return
+        summary = ", ".join(f"{name}: {count}" for name, count in sorted(counts.items()))
+        self.region_summary.setText(f"Assigned channels: {summary}")
 
     def _generate_groups(self) -> None:
         self._initialize_manual_designs()
@@ -402,7 +532,9 @@ class MainWindow(QMainWindow):
             return
         self.group_designs = dialog.designs
         self.groups = dialog.groups()
+        self.channel_regions = {channel: label for channel, label in self.channel_regions.items() if any(channel in group.channels for group in self.groups)}
         self._reset_colors()
+        self._refresh_region_summary()
         self._refresh_all()
 
     def _reset_colors(self) -> None:
@@ -672,15 +804,13 @@ class MainWindow(QMainWindow):
         super().keyPressEvent(event)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
-        if event.type() == QEvent.Type.Wheel and self._handle_time_zoom_wheel(watched, event):
+        if event.type() == QEvent.Type.Wheel and self._handle_trace_wheel(watched, event):
             return True
         if event.type() == QEvent.Type.KeyPress and self._handle_navigation_key(event):
             return True
         return super().eventFilter(watched, event)
 
-    def _handle_time_zoom_wheel(self, watched: QObject, event) -> bool:
-        if not (event.modifiers() & Qt.KeyboardModifier.ControlModifier):
-            return False
+    def _handle_trace_wheel(self, watched: QObject, event) -> bool:
         if not isinstance(watched, QWidget):
             return False
         if not self._is_signal_view_wheel_target(watched):
@@ -688,9 +818,19 @@ class MainWindow(QMainWindow):
         delta = event.angleDelta().y()
         if delta == 0:
             return False
-        self._zoom_time_window(0.8 if delta > 0 else 1.25)
-        event.accept()
-        return True
+        modifiers = event.modifiers()
+        if modifiers & Qt.KeyboardModifier.ControlModifier:
+            self._zoom_time_window(0.8 if delta > 0 else 1.25)
+            event.accept()
+            return True
+        if modifiers & Qt.KeyboardModifier.ShiftModifier:
+            factor = 1.1 if delta > 0 else 1 / 1.1
+            self.spacing.setValue(
+                max(self.spacing.minimum(), min(self.spacing.maximum(), self.spacing.value() * factor))
+            )
+            event.accept()
+            return True
+        return False
 
     def _is_signal_view_wheel_target(self, watched: QWidget) -> bool:
         if watched is self.viewer or self.viewer.isAncestorOf(watched):
@@ -865,6 +1005,7 @@ class MainWindow(QMainWindow):
                     "Ctrl+End: jump to latest complete window",
                     "Ctrl+I / Ctrl+D: increase / decrease trace scale",
                     "Ctrl+Mouse wheel on traces: zoom time window",
+                    "Shift+Mouse wheel on traces: change row spacing",
                     "Ctrl+] / Ctrl+[: increase / decrease row spacing",
                     "Drag on traces: zoom selected X/Y range",
                     "Double-click traces: reset X/Y zoom",
