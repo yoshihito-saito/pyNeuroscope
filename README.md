@@ -1,8 +1,8 @@
 # pyNeuroscope
 
-pyNeuroscope is a Python desktop app inspired by NeuroScope for inspecting electrophysiology recordings and creating NeuroSuite compatible `amplifier.xml` files.
+pyNeuroscope is a Python desktop app inspired by NeuroScope for inspecting electrophysiology recordings, creating NeuroSuite compatible `amplifier.xml` files, and reviewing existing sleep-state annotations.
 
-It is designed for quick visual checks of `amplifier.dat`, channel grouping, bad-channel marking, color-map assignment, and XML export for downstream preprocessing workflows.
+It is designed for quick visual checks of `amplifier.dat`, channel grouping, bad-channel marking, color-map assignment, XML export, multi-subsession recordings, and manual editing of existing `SleepState.states.mat` results.
 
 ![pyNeuroscope screenshot](docs/pyneuroscope-screenshot.png)
 
@@ -13,9 +13,13 @@ It is designed for quick visual checks of `amplifier.dat`, channel grouping, bad
 - Scroll through time with the time bar or Left / Right keys.
 - Change the displayed time window with `Ctrl + mouse wheel` over the traces.
 - Adjust trace scale, row spacing, bandpass filtering, and common-average reference.
+- Display multi-subsession recordings with session epoch boundaries and overview labels.
 - Edit channel groups and inspect groups in the probe viewer.
 - Mark bad channels and save them as `skip="1"` in XML.
 - Apply channel colors with selectable color maps.
+- Load an existing `SleepState.states.mat` file and edit Wake / NREM / REM labels in the GUI.
+- Click state episodes to select ranges, inspect transition timing, and save edits back to disk.
+- Adjust spectrogram display with selectable colormaps.
 - Choose color mode:
   - `all`: assign the color map across channels in group order.
   - `group`: restart the color map inside each group.

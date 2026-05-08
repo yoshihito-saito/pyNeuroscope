@@ -11,6 +11,7 @@ license = "MIT"
 dependencies = [
   "matplotlib",
   "numpy",
+  "Pillow",
   "PySide6",
   "pyqtgraph",
   "scipy",

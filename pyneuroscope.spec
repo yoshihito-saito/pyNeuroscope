@@ -19,10 +19,8 @@ a = Analysis(
     excludes=[
         "IPython",
         "jedi",
-        "matplotlib",
         "numba",
         "pandas",
-        "PIL",
         "pytest",
         "setuptools",
         "sympy",
