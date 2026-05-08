@@ -23,6 +23,8 @@ class SignalViewer(QWidget):
         self._visible_rows: tuple[int, int] | None = None
         self._drag_start: QPoint | None = None
         self._drag_current: QPoint | None = None
+        self._show_channel_labels = True
+        self._epoch_boundaries = np.asarray([], dtype=np.float64)
         self.setMinimumHeight(360)
         self.setMinimumWidth(520)
         self.setAutoFillBackground(True)
@@ -35,12 +37,16 @@ class SignalViewer(QWidget):
         *,
         vertical_scale: float = 1.0,
         row_spacing: float = 1.0,
+        show_channel_labels: bool = True,
+        epoch_boundaries: Sequence[float] | None = None,
     ) -> None:
         self._time_seconds = time_seconds
         self._data = data
         self._layout_items = list(layout_items)
         self._vertical_scale = max(0.05, float(vertical_scale))
         self._row_spacing = max(0.25, float(row_spacing))
+        self._show_channel_labels = bool(show_channel_labels)
+        self._epoch_boundaries = np.asarray(epoch_boundaries if epoch_boundaries is not None else [], dtype=np.float64).reshape(-1)
         self._update_content_height()
         self.update()
 
@@ -77,11 +83,11 @@ class SignalViewer(QWidget):
         data = self._data
         width = max(1, self.width())
         height = max(1, self.height())
-        margin_left = 70
-        margin_right = 12
+        margin_left = 50
+        margin_right = 10
         margin_top = 24
         margin_bottom = 24
-        label_gutter = 54
+        label_gutter = 38
         visible_items = self._visible_layout_items()
         columns = max(item.column for item in self._layout_items) + 1
         rows_by_column = {
@@ -99,6 +105,7 @@ class SignalViewer(QWidget):
         max_points = max(2, int(trace_width))
         start_index, end_index = self._visible_sample_bounds(data.shape[0])
         visible_data = data[start_index:end_index]
+        visible_time = self._time_seconds[start_index:end_index]
         step = max(1, visible_data.shape[0] // max_points)
         sampled_data = visible_data[::step]
         x_values = np.linspace(0, 1, sampled_data.shape[0], dtype=np.float64)
@@ -130,7 +137,7 @@ class SignalViewer(QWidget):
             pen.setWidth(1)
             painter.setPen(pen)
             painter.drawPath(path)
-            if trace_height >= 5.0 and label_gutter >= 28:
+            if self._show_channel_labels and trace_height >= 5.0 and label_gutter >= 28:
                 font = QFont()
                 font.setPointSize(max(6, min(9, int(trace_height * 0.7))))
                 painter.setFont(font)
@@ -144,6 +151,19 @@ class SignalViewer(QWidget):
                     f"ch {item.channel}",
                 )
 
+        if visible_time.size >= 2 and self._epoch_boundaries.size:
+            self._draw_epoch_boundaries(
+                painter,
+                visible_time,
+                columns,
+                margin_left,
+                column_width,
+                label_gutter,
+                trace_width,
+                margin_top,
+                height - margin_bottom,
+            )
+
         if self._x_range != (0.0, 1.0):
             painter.setPen(QPen(QColor("#d6dde8")))
             painter.drawText(8, height - 8, f"zoom {self._x_range[0]:.3f}-{self._x_range[1]:.3f}")
@@ -153,6 +173,34 @@ class SignalViewer(QWidget):
             painter.fillRect(rect, QColor(120, 160, 220, 55))
             painter.setPen(QPen(QColor("#7aa7ff")))
             painter.drawRect(rect)
+
+    def _draw_epoch_boundaries(
+        self,
+        painter: QPainter,
+        visible_time: np.ndarray,
+        columns: int,
+        margin_left: float,
+        column_width: float,
+        label_gutter: float,
+        trace_width: float,
+        top: float,
+        bottom: float,
+    ) -> None:
+        start_time = float(visible_time[0])
+        end_time = float(visible_time[-1])
+        if end_time <= start_time:
+            return
+        pen = QPen(QColor(255, 255, 255, 255))
+        pen.setWidth(2)
+        pen.setStyle(Qt.PenStyle.SolidLine)
+        painter.setPen(pen)
+        for boundary in self._epoch_boundaries:
+            if boundary <= start_time or boundary >= end_time:
+                continue
+            fraction = (float(boundary) - start_time) / (end_time - start_time)
+            for column in range(columns):
+                x = margin_left + column * column_width + label_gutter + fraction * trace_width
+                painter.drawLine(QPointF(x, top), QPointF(x, bottom))
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:

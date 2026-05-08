@@ -9,6 +9,7 @@ from .models import ChannelGroup
 
 class ProbeViewer(QWidget):
     channelDoubleClicked = Signal(int)
+    groupClicked = Signal(int)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -17,6 +18,8 @@ class ProbeViewer(QWidget):
         self._bad_channels: set[int] = set()
         self._channel_colors: dict[int, str] = {}
         self._dot_hits: dict[int, tuple[float, float, float]] = {}
+        self._visible_groups: set[int] = set()
+        self._group_hits: dict[int, QRectF] = {}
         self.setMinimumWidth(280)
         self.setMinimumHeight(420)
 
@@ -26,11 +29,16 @@ class ProbeViewer(QWidget):
         groups: list[ChannelGroup],
         bad_channels: set[int],
         channel_colors: dict[int, str],
+        visible_groups: set[int] | None = None,
     ) -> None:
         self._n_channels = n_channels
         self._groups = list(groups)
         self._bad_channels = set(bad_channels)
         self._channel_colors = dict(channel_colors)
+        if visible_groups is None:
+            self._visible_groups = set(range(len(self._groups)))
+        else:
+            self._visible_groups = {index for index in visible_groups if 0 <= index < len(self._groups)}
         self.update()
 
     def paintEvent(self, event) -> None:  # noqa: N802
@@ -38,6 +46,7 @@ class ProbeViewer(QWidget):
         painter.fillRect(self.rect(), QColor("#101216"))
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         self._dot_hits = {}
+        self._group_hits = {}
 
         if not self._groups:
             painter.setPen(QPen(QColor("#8a9099")))
@@ -60,33 +69,46 @@ class ProbeViewer(QWidget):
         painter.drawText(QRectF(0, 0, self.width(), title_height), Qt.AlignmentFlag.AlignCenter, "Channel Groups")
 
         for group_index, group in enumerate(self._groups):
+            is_visible = group_index in self._visible_groups
             x_center = margin + column_width * (group_index + 0.5)
-            painter.setPen(QPen(QColor("#9aa4b2")))
+            header_rect = QRectF(margin + column_width * group_index, title_height, column_width, label_height)
+            self._group_hits[group_index] = header_rect
+            painter.setPen(QPen(QColor("#9aa4b2") if is_visible else QColor("#59616d")))
             painter.drawText(
-                QRectF(margin + column_width * group_index, title_height, column_width, label_height),
+                header_rect,
                 Qt.AlignmentFlag.AlignCenter,
                 f"G{group_index + 1}",
             )
-            painter.setPen(QPen(QColor("#2d333d")))
+            painter.setPen(QPen(QColor("#2d333d") if is_visible else QColor("#1f242c")))
             painter.drawLine(int(x_center), header + 8, int(x_center), self.height() - margin)
 
             for row, channel in enumerate(group.channels):
                 y = header + row_step * (row + 0.5)
-                color = QColor("#5f6670") if channel in self._bad_channels else QColor(
-                    self._channel_colors.get(channel, "#ff00ff")
-                )
+                color = QColor("#5f6670") if channel in self._bad_channels else QColor(self._channel_colors.get(channel, "#ff00ff"))
+                if not is_visible:
+                    color.setAlpha(70)
                 painter.setBrush(color)
                 pen = QPen(QColor("#c3ccd8") if channel in self._bad_channels else QColor("#12161c"))
+                if not is_visible:
+                    pen.setColor(QColor("#3a4049"))
                 pen.setWidth(2 if channel in self._bad_channels else 1)
                 painter.setPen(pen)
                 painter.drawEllipse(QPointF(x_center, y), radius, radius)
                 self._dot_hits[channel] = (x_center, y, radius + 5)
-                painter.setPen(QPen(QColor("#b8c7da")))
+                painter.setPen(QPen(QColor("#b8c7da") if is_visible else QColor("#616977")))
                 painter.drawText(
                     QRectF(x_center + radius + 3, y - 8, max(24, column_width / 2), 16),
                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                     str(channel),
                 )
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        pos = event.position()
+        group_index = self._group_at(pos.x(), pos.y())
+        if group_index is not None:
+            self.groupClicked.emit(group_index)
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
         if event.button() != Qt.MouseButton.LeftButton:
@@ -105,3 +127,9 @@ class ProbeViewer(QWidget):
                 best_channel = channel
                 best_distance = distance
         return best_channel
+
+    def _group_at(self, x: float, y: float) -> int | None:
+        for group_index, rect in self._group_hits.items():
+            if rect.contains(QPointF(x, y)):
+                return group_index
+        return None

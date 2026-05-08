@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from importlib.resources import files
-
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
@@ -23,11 +23,14 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QScrollBar,
     QSpinBox,
+    QStackedWidget,
     QSplitter,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
+import numpy as np
+from scipy.io import loadmat, savemat
 
 from .anatomical_map import AnatomicalMapError, build_anatomical_map_csv, load_anatomical_map_csv
 from .brain_region_editor import BrainRegionEditorDialog
@@ -42,7 +45,10 @@ from .channel_map_editor import ChannelMapDialog, GroupDesign, group_designs_fro
 from .dat_reader import DatReaderError, inspect_dat, read_dat_window
 from .models import ChannelGroup, RecordingMetadata
 from .probe_viewer import ProbeViewer
+from .recording_overview import RecordingOverviewWidget
 from .signal_layout import group_column_layout, single_column_layout
+from .sleep_state_edit import append_theta_epochs, idx_to_intervals, states_to_episodes
+from .sleep_state_viewer import SPECTROGRAM_COLORMAPS, SleepStateViewer
 from .signal_viewer import SignalViewer
 from .signal_filters import SignalFilterError, bandpass_filter, common_average_reference
 from .validation import validate_settings
@@ -58,13 +64,28 @@ class MainWindow(QMainWindow):
         self.groups: list[ChannelGroup] = []
         self.group_designs: list[GroupDesign] = []
         self.bad_channels: set[int] = set()
+        self.visible_groups: set[int] = set()
         self.channel_colors: dict[int, str] = {}
         self.channel_regions: dict[int, str] = {}
         self.loaded_metadata = RecordingMetadata()
+        self._recording_dat_paths: list[Path] = []
+        self._recording_epoch_segments: list[tuple[str, float, float]] = []
+        self._recording_epoch_boundaries = np.asarray([], dtype=float)
         self.row_spacing = 1.0
+        self.record_window_start_seconds = 0.0
+        self.record_window_duration_seconds = 1.0
+        self.sleep_window_start_seconds = 0.0
+        self.sleep_window_duration_seconds = 20.0 * 60.0
+        self._active_left_tab_index = 0
         self._updating_time_scroll = False
         self.stream_timer = QTimer(self)
         self.stream_timer.timeout.connect(self._stream_latest_window)
+        self.sleep_state_data: dict | None = None
+        self.sleep_state_path: Path | None = None
+        self.sleep_selection_range: tuple[float, float] | None = None
+        self.sleep_selection_patches: list = []
+        self.sleep_span_selectors: list = []
+        self.sleep_pending_edit: tuple[float, float, int] | None = None
         self._build_ui()
         QApplication.instance().installEventFilter(self)
         self._generate_groups()
@@ -84,7 +105,7 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 9)
         splitter.setStretchFactor(2, 0)
-        splitter.setSizes([215, 1120, 260])
+        splitter.setSizes([330, 1005, 260])
         layout.addWidget(splitter, 1)
         self.setCentralWidget(container)
 
@@ -95,24 +116,29 @@ class MainWindow(QMainWindow):
         self.dat_path = QLineEdit()
         self.dat_path.setMinimumWidth(260)
         self.dat_path.setMaximumWidth(720)
-        self.dat_path.setPlaceholderText("Select amplifier.dat")
+        self.dat_path.setPlaceholderText("Select basepath or session folder")
         browse = QPushButton("Browse")
         browse.clicked.connect(self._browse_dat)
         layout.addWidget(browse)
-        layout.addWidget(QLabel("DAT file"))
+        layout.addWidget(QLabel("Recording path"))
         layout.addWidget(self.dat_path, 1)
         layout.addStretch(2)
         return panel
 
     def _build_left_panel(self) -> QWidget:
         panel = QWidget()
-        panel.setMaximumWidth(300)
-        panel.setMinimumWidth(260)
+        panel.setMaximumWidth(360)
+        panel.setMinimumWidth(320)
         layout = QVBoxLayout(panel)
-        tabs = QTabWidget()
-        tabs.addTab(self._build_recording_tab(), "Recording")
-        tabs.addTab(self._build_brain_regions_tab(), "Brain Regions")
-        layout.addWidget(tabs, 1)
+        self.left_tabs = QTabWidget()
+        self.left_tabs.setUsesScrollButtons(True)
+        self.left_tabs.tabBar().setElideMode(Qt.TextElideMode.ElideNone)
+        self.left_tabs.tabBar().setExpanding(False)
+        self.left_tabs.tabBar().setStyleSheet("QTabBar::tab { padding: 5px 8px; font-size: 12px; }")
+        self.left_tabs.addTab(self._build_recording_tab(), "Recording")
+        self.left_tabs.addTab(self._build_sleep_scoring_tab(), "State editor")
+        self.left_tabs.currentChanged.connect(self._left_tab_changed)
+        layout.addWidget(self.left_tabs, 1)
         return panel
 
     def _build_recording_tab(self) -> QWidget:
@@ -192,7 +218,7 @@ class MainWindow(QMainWindow):
             widget.valueChanged.connect(self._time_controls_changed)
             widget.lineEdit().returnPressed.connect(self._apply_window_controls)
 
-        self.dat_path.textChanged.connect(self._refresh_all)
+        self.dat_path.textChanged.connect(self._dat_path_text_changed)
         self.dat_path.editingFinished.connect(self._dat_path_committed)
         self.bad_channels_text.textChanged.connect(self._bad_channels_changed)
         self.ignore_bad_channels.toggled.connect(self._refresh_viewer_layout)
@@ -221,13 +247,18 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.ignore_bad_channels)
         layout.addWidget(self.streaming_mode)
         layout.addWidget(self._build_filter_panel())
+        layout.addWidget(self._build_brain_regions_section())
         layout.addStretch(1)
         layout.addWidget(shortcuts)
         return panel
 
-    def _build_brain_regions_tab(self) -> QWidget:
+    def _build_brain_regions_section(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(4)
+        section_label = QLabel("Brain Regions")
+        section_label.setStyleSheet("font-weight: 600;")
         open_editor = QPushButton("Add Brain Regions")
         open_editor.clicked.connect(self._edit_brain_regions)
         save_csv = QPushButton("Save anatomical_map.csv")
@@ -237,10 +268,55 @@ class MainWindow(QMainWindow):
         self.region_summary = QLabel("No regions assigned")
         self.region_summary.setWordWrap(True)
 
+        layout.addWidget(section_label)
         layout.addWidget(open_editor)
         layout.addWidget(load_csv)
         layout.addWidget(save_csv)
         layout.addWidget(self.region_summary)
+        return panel
+
+    def _build_sleep_scoring_tab(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setSpacing(8)
+
+        self.sleep_manual_state = QComboBox()
+        self.sleep_manual_state.addItems(["Wake", "NREM", "REM"])
+        self.sleep_manual_selection = QLabel("Selected range: -")
+        self.sleep_manual_selection.setWordWrap(True)
+        self.sleep_show_transitions = QCheckBox("State transition timing")
+        self.sleep_show_transitions.toggled.connect(self._refresh_sleep_plot_window)
+        self.sleep_spectrogram_cmap = QComboBox()
+        self.sleep_spectrogram_cmap.addItems([name.capitalize() if name != "mako" else "Mako" for name in SPECTROGRAM_COLORMAPS])
+        self.sleep_spectrogram_cmap.setCurrentText("Viridis")
+        self.sleep_spectrogram_cmap.currentTextChanged.connect(self._refresh_sleep_plot_window)
+        self.sleep_modify_button = QPushButton("Modify State")
+        self.sleep_modify_button.clicked.connect(self._modify_sleep_state_selection)
+        self.sleep_modify_button.setEnabled(False)
+        self.sleep_update_button = QPushButton("Update")
+        self.sleep_update_button.clicked.connect(self._update_sleep_state_file)
+        self.sleep_update_button.setEnabled(False)
+        self.sleep_load_button = QPushButton("Load Result Folder")
+        self.sleep_load_button.clicked.connect(self._load_sleep_state_clicked)
+        self.sleep_status = QLabel("Load an existing SleepState.states.mat file to inspect and edit results.")
+        self.sleep_status.setWordWrap(True)
+        self.sleep_outputs = QLabel("Outputs: -")
+        self.sleep_outputs.setWordWrap(True)
+        info = QLabel("This tab loads an existing sleep-state result folder and lets you overwrite state labels.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #b8c7da;")
+
+        layout.addWidget(info)
+        layout.addWidget(self.sleep_load_button)
+        layout.addWidget(self.sleep_status)
+        layout.addWidget(self.sleep_outputs)
+        layout.addWidget(QLabel("Spectrogram colormap"))
+        layout.addWidget(self.sleep_spectrogram_cmap)
+        layout.addWidget(self.sleep_show_transitions)
+        layout.addWidget(self.sleep_manual_state)
+        layout.addWidget(self.sleep_manual_selection)
+        layout.addWidget(self.sleep_modify_button)
+        layout.addWidget(self.sleep_update_button)
         layout.addStretch(1)
         return panel
 
@@ -268,6 +344,16 @@ class MainWindow(QMainWindow):
     def _build_center_panel(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
+        self.center_stack = QStackedWidget()
+        self.center_stack.addWidget(self._build_signal_center_page())
+        self.center_stack.addWidget(self._build_sleep_center_page())
+        layout.addWidget(self.center_stack, 1)
+        layout.addWidget(self._build_time_bar())
+        return panel
+
+    def _build_signal_center_page(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
         mode_row = QHBoxLayout()
         self.view_mode = QComboBox()
         self.view_mode.addItems(["single_column", "group_columns"])
@@ -291,14 +377,28 @@ class MainWindow(QMainWindow):
         mode_row.addWidget(QLabel("Spacing"))
         mode_row.addWidget(self.spacing)
         mode_row.addStretch(1)
+        self.recording_overview = RecordingOverviewWidget()
+        self.recording_overview.set_click_callback(self._jump_to_recording_overview_time)
         self.viewer = SignalViewer()
         self.signal_scroll = QScrollArea()
         self.signal_scroll.setWidget(self.viewer)
         self.signal_scroll.setWidgetResizable(True)
         self.signal_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         layout.addLayout(mode_row)
+        layout.addWidget(self.recording_overview)
         layout.addWidget(self.signal_scroll, 1)
-        layout.addWidget(self._build_time_bar())
+        return panel
+
+    def _build_sleep_center_page(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.sleep_viewer = SleepStateViewer()
+        self.sleep_viewer.set_selection_callback(self._sleep_span_selected)
+        self.sleep_viewer.set_reset_view_callback(self._reset_sleep_view_window)
+        layout.addWidget(self.sleep_viewer, 1)
+        self.sleep_center_layout = layout
         return panel
 
     def _build_time_bar(self) -> QWidget:
@@ -339,6 +439,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(6)
         self.probe_viewer = ProbeViewer()
         self.probe_viewer.channelDoubleClicked.connect(self._toggle_bad_channel)
+        self.probe_viewer.groupClicked.connect(self._toggle_group_visibility)
         self.color_map = QComboBox()
         self.color_map.addItems(COLOR_MAP_NAMES)
         self.color_map.setCurrentText("spring")
@@ -361,18 +462,286 @@ class MainWindow(QMainWindow):
         return panel
 
     def _browse_dat(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Select amplifier.dat", "", "DAT files (*.dat);;All files (*)")
+        path = QFileDialog.getExistingDirectory(self, "Select basepath or session folder", "")
         if path:
             self.dat_path.setText(path)
             self._dat_path_committed()
+
+    def _dat_path_text_changed(self) -> None:
+        self._refresh_duration()
+        if not self._is_sleep_scoring_active():
+            self._refresh_viewer_layout()
+
+    def _resolve_recording_dat_paths(self, selected_path: Path) -> list[Path]:
+        if selected_path.is_file():
+            if selected_path.name.lower() != "amplifier.dat":
+                raise DatReaderError(f"Expected amplifier.dat, got: {selected_path.name}")
+            return [selected_path]
+        if not selected_path.exists():
+            raise DatReaderError(f"Path does not exist: {selected_path}")
+        if not selected_path.is_dir():
+            raise DatReaderError(f"Unsupported path: {selected_path}")
+        direct_dat = selected_path / "amplifier.dat"
+        if direct_dat.exists():
+            return [direct_dat]
+        matches = sorted(
+            (path for path in selected_path.rglob("amplifier.dat") if path.is_file()),
+            key=self._recording_session_sort_key,
+        )
+        if not matches:
+            raise DatReaderError(f"No amplifier.dat found under: {selected_path}")
+        return matches
+
+    def _recording_session_sort_key(self, path: Path) -> tuple:
+        timestamp = self._extract_recording_folder_timestamp(path)
+        if timestamp is not None:
+            return (0, timestamp, str(path).lower())
+        return (1, path.stat().st_mtime, str(path).lower())
+
+    def _extract_recording_folder_timestamp(self, path: Path) -> tuple[int, int, int, int, int, int] | None:
+        for candidate in [path.parent.name, *[parent.name for parent in path.parents]]:
+            match = re.search(r"(\d{6})_(\d{6})$", candidate)
+            if match is None:
+                continue
+            date_part, time_part = match.groups()
+            return (
+                int(date_part[0:2]),
+                int(date_part[2:4]),
+                int(date_part[4:6]),
+                int(time_part[0:2]),
+                int(time_part[2:4]),
+                int(time_part[4:6]),
+            )
+        return None
+
+    def _active_recording_dat_paths(self) -> list[Path]:
+        if self._recording_dat_paths:
+            return list(self._recording_dat_paths)
+        path = self.dat_path.text().strip()
+        if not path:
+            return []
+        try:
+            return self._resolve_recording_dat_paths(Path(path))
+        except DatReaderError:
+            return []
+
+    def _recording_dat_infos(self):
+        infos = []
+        for path in self._active_recording_dat_paths():
+            infos.append(
+                inspect_dat(
+                    path,
+                    self.n_channels.value(),
+                    self.sampling_rate.value(),
+                    allow_trailing_bytes=True,
+                )
+            )
+        return infos
+
+    def _update_recording_epoch_metadata(self, infos) -> None:
+        segments: list[tuple[str, float, float]] = []
+        boundaries: list[float] = []
+        offset = 0.0
+        for index, info in enumerate(infos, 1):
+            start = offset
+            end = offset + info.duration_seconds
+            segments.append((str(index), start, end))
+            if index > 1:
+                boundaries.append(start)
+            offset = end
+        self._recording_epoch_segments = segments
+        self._recording_epoch_boundaries = np.asarray(boundaries, dtype=float)
+        self._refresh_recording_overview()
+
+    def _refresh_recording_overview(self) -> None:
+        if not hasattr(self, "recording_overview"):
+            return
+        if not self._recording_epoch_segments:
+            self.recording_overview.clear()
+            return
+        total_duration = self._recording_epoch_segments[-1][2]
+        self.recording_overview.set_epochs(self._recording_epoch_segments, total_duration)
+        self.recording_overview.set_window(self.record_window_start_seconds, self.record_window_duration_seconds)
+
+    def _jump_to_recording_overview_time(self, timestamp_seconds: float) -> None:
+        duration = self._current_recording_duration_seconds()
+        if duration is None:
+            return
+        window_duration = self._window_duration_seconds()
+        max_start = max(0.0, duration - window_duration)
+        start = max(0.0, min(max_start, float(timestamp_seconds) - window_duration * 0.5))
+        self._set_window_start_seconds(start)
+        if self._is_sleep_scoring_active():
+            self._refresh_sleep_plot_window()
+        else:
+            self._load_window(silent=True)
+
+    def _load_recording_window(self, *, silent: bool = False) -> None:
+        infos = self._recording_dat_infos()
+        if not infos:
+            return
+        self._update_recording_epoch_metadata(infos)
+        total_duration = sum(info.duration_seconds for info in infos)
+        start = self._window_start_seconds()
+        duration = self._window_duration_seconds()
+        if start >= total_duration:
+            if not silent:
+                QMessageBox.critical(self, "DAT Error", "Requested window is outside the recording.")
+            return
+        time_parts: list[np.ndarray] = []
+        data_parts: list[np.ndarray] = []
+        remaining_start = start
+        remaining_duration = duration
+        offset = 0.0
+        clipped = False
+        first_start_frame = 0
+        first_frame_set = False
+        for info in infos:
+            if remaining_duration <= 0:
+                break
+            seg_duration = info.duration_seconds
+            if remaining_start >= seg_duration:
+                remaining_start -= seg_duration
+                offset += seg_duration
+                continue
+            local_start = remaining_start
+            local_duration = min(remaining_duration, seg_duration - local_start)
+            try:
+                window = read_dat_window(
+                    info.path,
+                    self.n_channels.value(),
+                    self.sampling_rate.value(),
+                    local_start,
+                    local_duration,
+                    allow_trailing_bytes=True,
+                )
+            except (DatReaderError, OSError) as exc:
+                if not silent:
+                    QMessageBox.critical(self, "DAT Error", str(exc))
+                return
+            if not first_frame_set:
+                first_start_frame = int(round(start * self.sampling_rate.value()))
+                first_frame_set = True
+            if window.time_seconds.size:
+                time_parts.append(window.time_seconds + offset)
+                data_parts.append(window.data)
+            if window.clipped or local_duration < remaining_duration:
+                clipped = clipped or window.clipped
+            remaining_duration -= local_duration
+            remaining_start = 0.0
+            offset += seg_duration
+        if not time_parts or not data_parts:
+            return
+        self._current_time = np.concatenate(time_parts, axis=0)
+        self._raw_data = np.concatenate(data_parts, axis=0)
+        self._current_data = self._process_window_data(self._raw_data)
+        self._refresh_viewer_layout()
 
     def _dat_path_committed(self) -> None:
         path = self.dat_path.text().strip()
         if not path:
             return
-        self._load_adjacent_xml_if_present(Path(path))
-        self._load_adjacent_anatomical_map_if_present(Path(path))
-        self._load_window(silent=True)
+        try:
+            self._recording_dat_paths = self._resolve_recording_dat_paths(Path(path))
+            total_duration = sum(info.duration_seconds for info in self._recording_dat_infos())
+        except DatReaderError as exc:
+            QMessageBox.critical(self, "Recording Path Error", str(exc))
+            self._recording_dat_paths = []
+            return
+        self.record_window_start_seconds = 0.0
+        self.record_window_duration_seconds = min(
+            1.0,
+            max(0.001, total_duration),
+        )
+        if not self._is_sleep_scoring_active():
+            self._apply_window_controls_to_widgets(self.record_window_start_seconds, self.record_window_duration_seconds)
+        primary_dat_path = self._recording_dat_paths[0]
+        self._load_adjacent_xml_if_present(primary_dat_path)
+        self._load_adjacent_anatomical_map_if_present(primary_dat_path)
+        if self._is_sleep_scoring_active():
+            self._clear_sleep_state_context()
+            self.sleep_status.setText("DAT selected. Load an existing SleepState.states.mat file when needed.")
+            self.sleep_outputs.setText("Outputs: -")
+            self._refresh_duration()
+            self._sync_time_scroll(self._current_recording_duration_seconds())
+        else:
+            self._load_window(silent=True)
+        if len(self._recording_dat_paths) > 1:
+            self.statusBar().showMessage(f"Loaded {len(self._recording_dat_paths)} sessions in chronological order", 5000)
+        else:
+            self.statusBar().showMessage(f"Loaded session: {primary_dat_path.parent.name}", 5000)
+
+    def _left_tab_changed(self, index: int) -> None:
+        if not hasattr(self, "center_stack"):
+            return
+        self._store_current_window_controls(self._active_left_tab_index)
+        if index == 1:
+            self._apply_window_controls_to_widgets(self.sleep_window_start_seconds, self.sleep_window_duration_seconds)
+            self.center_stack.setCurrentIndex(1)
+            self._refresh_sleep_plot_window()
+        else:
+            self._apply_window_controls_to_widgets(self.record_window_start_seconds, self.record_window_duration_seconds)
+            self.center_stack.setCurrentIndex(0)
+            self._load_window(silent=True)
+        self._active_left_tab_index = index
+        self._sync_time_scroll(self._current_recording_duration_seconds())
+
+    def _default_sleep_state_path(self) -> Path | None:
+        paths = self._active_recording_dat_paths()
+        if not paths:
+            return None
+        dat_path = paths[0]
+        return dat_path.parent / f"{dat_path.stem}.SleepState.states.mat"
+
+    def _load_sleep_state_clicked(self) -> None:
+        default_path = self._default_sleep_state_path()
+        start = str(default_path.parent if default_path is not None else Path.cwd())
+        path = QFileDialog.getExistingDirectory(self, "Select state-scoring result folder", start)
+        if not path:
+            return
+        self._load_sleep_state_basepath(Path(path))
+
+    def _clear_sleep_state_context(self) -> None:
+        self.sleep_state_data = None
+        self.sleep_state_path = None
+        self._clear_sleep_plot()
+
+    def _load_sleep_state_basepath(self, basepath: Path) -> None:
+        sleep_state_path = self._resolve_sleep_state_path(basepath)
+        if sleep_state_path is None:
+            QMessageBox.information(
+                self,
+                "State editor",
+                f"Could not find a *.SleepState.states.mat file in:\n{basepath}",
+            )
+            return
+        self._load_sleep_state_path(sleep_state_path)
+
+    def _resolve_sleep_state_path(self, basepath: Path) -> Path | None:
+        dat_path_text = self.dat_path.text().strip()
+        if dat_path_text:
+            candidate = basepath / f"{Path(dat_path_text).stem}.SleepState.states.mat"
+            if candidate.exists():
+                return candidate
+        matches = sorted(basepath.glob("*.SleepState.states.mat"))
+        if not matches:
+            return None
+        return matches[0]
+
+    def _load_sleep_state_path(self, sleep_state_path: Path) -> None:
+        basepath = sleep_state_path.parent
+        basename = sleep_state_path.name.replace(".SleepState.states.mat", "")
+        self._load_sleep_scoring_plot(sleep_state_path)
+        self.sleep_status.setText("Loaded existing scoring.")
+        output_names = [sleep_state_path.name]
+        for related in [
+            basepath / f"{basename}.SleepScoreLFP.LFP.mat",
+            basepath / f"{basename}.EMGFromLFP.LFP.mat",
+            basepath / f"{basename}.SleepStateEpisodes.states.mat",
+        ]:
+            if related.exists():
+                output_names.append(related.name)
+        self.sleep_outputs.setText(f"Outputs: {', '.join(output_names)}")
 
     def _load_xml(self) -> None:
         start = ""
@@ -401,6 +770,7 @@ class MainWindow(QMainWindow):
             self.lfp_sampling_rate.setValue(metadata.lfp_sampling_rate)
         self.groups = groups
         self.group_designs = group_designs_from_groups(groups)
+        self._reset_visible_groups()
         self.bad_channels = bad
         self.bad_channels_text.setText(", ".join(str(ch) for ch in sorted(bad)))
         dat_path = self.dat_path.text().strip()
@@ -506,9 +876,193 @@ class MainWindow(QMainWindow):
         summary = ", ".join(f"{name}: {count}" for name, count in sorted(counts.items()))
         self.region_summary.setText(f"Assigned channels: {summary}")
 
+    def _store_current_window_controls(self, tab_index: int | None = None) -> None:
+        target = self.left_tabs.currentIndex() if tab_index is None else tab_index
+        start = self._window_start_seconds()
+        duration = self._window_duration_seconds()
+        if target == 1:
+            self.sleep_window_start_seconds = start
+            self.sleep_window_duration_seconds = duration
+        else:
+            self.record_window_start_seconds = start
+            self.record_window_duration_seconds = duration
+
+    def _apply_window_controls_to_widgets(self, start_seconds: float, duration_seconds: float) -> None:
+        self._set_window_duration_seconds(duration_seconds, persist=False)
+        self._set_window_start_seconds(start_seconds, persist=False)
+
+    def _clear_sleep_plot(self) -> None:
+        self.sleep_viewer.clear_data()
+        self.sleep_selection_range = None
+        self.sleep_pending_edit = None
+        self.sleep_manual_selection.setText("Selected range: -")
+        self.sleep_modify_button.setEnabled(False)
+        self.sleep_update_button.setEnabled(False)
+
+    def _load_sleep_scoring_plot(self, sleep_state_path: Path) -> None:
+        loaded = loadmat(sleep_state_path, simplify_cells=True)
+        sleep_state = loaded.get("SleepState")
+        if not isinstance(sleep_state, dict):
+            self._clear_sleep_plot()
+            return
+        self.sleep_state_data = sleep_state
+        self.sleep_state_path = sleep_state_path
+        self.sleep_selection_range = None
+        self.sleep_pending_edit = None
+        self.sleep_manual_selection.setText("Selected range: -")
+        self.sleep_modify_button.setEnabled(False)
+        self.sleep_update_button.setEnabled(False)
+        self.sleep_window_start_seconds = 0.0
+        self.sleep_window_duration_seconds = self._sleep_state_duration_seconds()
+        self._apply_window_controls_to_widgets(self.sleep_window_start_seconds, self.sleep_window_duration_seconds)
+        self._sync_time_scroll(self._current_recording_duration_seconds())
+        self._refresh_sleep_plot_window()
+
+    def _is_sleep_scoring_active(self) -> bool:
+        return hasattr(self, "left_tabs") and self.left_tabs.currentIndex() == 1
+
+    def _refresh_sleep_plot_window(self) -> None:
+        if self.sleep_state_data is None:
+            self._clear_sleep_plot()
+            return
+
+        idx = self.sleep_state_data.get("idx", {})
+        detectorinfo = self.sleep_state_data.get("detectorinfo", {})
+        detectionparms = detectorinfo.get("detectionparms", {}) if isinstance(detectorinfo, dict) else {}
+        plot_materials = detectorinfo.get("StatePlotMaterials", {}) if isinstance(detectorinfo, dict) else {}
+        metrics = detectionparms.get("SleepScoreMetrics", {}) if isinstance(detectionparms, dict) else {}
+        hists = metrics.get("histsandthreshs", {}) if isinstance(metrics, dict) else {}
+        state_t = np.asarray(idx.get("timestamps", np.asarray([])), dtype=float).reshape(-1)
+        states = np.asarray(idx.get("states", np.asarray([])), dtype=float).reshape(-1)
+        sw = np.asarray(metrics.get("broadbandSlowWave", np.asarray([])), dtype=float).reshape(-1)
+        emg = np.asarray(metrics.get("EMG", np.asarray([])), dtype=float).reshape(-1)
+        thratio = np.asarray(metrics.get("thratio", np.asarray([])), dtype=float).reshape(-1)
+        metric_t = np.asarray(metrics.get("t_clus", np.asarray([])), dtype=float).reshape(-1)
+        sw_thresh = float(hists.get("swthresh")) if isinstance(hists, dict) and hists.get("swthresh") is not None else None
+        emg_thresh = float(hists.get("EMGthresh")) if isinstance(hists, dict) and hists.get("EMGthresh") is not None else None
+        thratio_thresh = float(hists.get("THthresh")) if isinstance(hists, dict) and hists.get("THthresh") is not None else None
+        if isinstance(plot_materials, dict) and plot_materials.get("thFFTspec_raw") is not None:
+            th_spec = np.asarray(plot_materials.get("thFFTspec_raw", np.empty((0, 0))), dtype=float)
+            th_spec_log_scale = True
+        else:
+            th_spec = np.asarray(plot_materials.get("thFFTspec", np.empty((0, 0))), dtype=float) if isinstance(plot_materials, dict) else np.empty((0, 0))
+            th_spec_log_scale = False
+        th_freqs = np.asarray(plot_materials.get("thFFTfreqs", np.asarray([])), dtype=float).reshape(-1) if isinstance(plot_materials, dict) else np.asarray([])
+        th_spec_t = np.asarray(plot_materials.get("t_clus", np.asarray([])), dtype=float).reshape(-1) if isinstance(plot_materials, dict) else np.asarray([])
+        if metric_t.size == 0:
+            metric_t = th_spec_t if th_spec_t.size else state_t
+
+        start = self._window_start_seconds()
+        self.sleep_viewer.set_data(
+            state_timestamps=state_t,
+            metric_timestamps=metric_t,
+            states=states,
+            sw=sw,
+            emg=emg,
+            thratio=thratio,
+            sw_threshold=sw_thresh,
+            emg_threshold=emg_thresh,
+            thratio_threshold=thratio_thresh,
+            spec=th_spec,
+            freqs=th_freqs,
+            spec_timestamps=th_spec_t,
+            spec_log_scale=th_spec_log_scale,
+        )
+        self.sleep_viewer.set_spectrogram_colormap(self.sleep_spectrogram_cmap.currentText())
+        self.sleep_viewer.set_show_state_transitions(self.sleep_show_transitions.isChecked())
+        self.sleep_viewer.set_window(start, self._window_duration_seconds())
+        self.sleep_viewer.set_selection(self.sleep_selection_range)
+
+    def _sleep_span_selected(self, xmin: float, xmax: float) -> None:
+        lo = float(min(xmin, xmax))
+        hi = float(max(xmin, xmax))
+        if hi - lo <= 0:
+            self.sleep_selection_range = None
+            self.sleep_pending_edit = None
+            self.sleep_manual_selection.setText("Selected range: -")
+            self.sleep_modify_button.setEnabled(False)
+            self.sleep_update_button.setEnabled(False)
+            self._draw_sleep_selection()
+            return
+        self.sleep_selection_range = (lo, hi)
+        self.sleep_pending_edit = None
+        self.sleep_manual_selection.setText(f"Selected range: {lo:.3f}s to {hi:.3f}s")
+        self.sleep_modify_button.setEnabled(self.sleep_state_data is not None)
+        self.sleep_update_button.setEnabled(False)
+        self._draw_sleep_selection()
+
+    def _clear_sleep_selection_artists(self) -> None:
+        self.sleep_selection_patches = []
+
+    def _draw_sleep_selection(self) -> None:
+        self.sleep_viewer.set_selection(self.sleep_selection_range)
+
+    def _modify_sleep_state_selection(self) -> None:
+        if self.sleep_state_data is None or self.sleep_selection_range is None:
+            return
+        idx = self.sleep_state_data.get("idx", {})
+        timestamps = np.asarray(idx.get("timestamps", np.asarray([])), dtype=float).reshape(-1)
+        if not timestamps.size:
+            return
+        lo, hi = self.sleep_selection_range
+        state_code = {"Wake": 1, "NREM": 3, "REM": 5}[self.sleep_manual_state.currentText()]
+        lo_idx = int(np.searchsorted(timestamps, lo, side="left"))
+        hi_idx = int(np.searchsorted(timestamps, hi, side="right")) - 1
+        if lo_idx >= timestamps.size or hi_idx < 0 or hi_idx < lo_idx:
+            return
+        snapped_lo = float(timestamps[lo_idx])
+        snapped_hi = float(timestamps[hi_idx])
+        self.sleep_selection_range = (snapped_lo, snapped_hi)
+        self.sleep_pending_edit = (snapped_lo, snapped_hi, state_code)
+        state_name = self.sleep_manual_state.currentText()
+        self.sleep_manual_selection.setText(f"Selected range: {snapped_lo:.3f}s to {snapped_hi:.3f}s -> {state_name}")
+        self.sleep_update_button.setEnabled(True)
+        self.sleep_status.setText("Manual state edit staged. Press Update to overwrite SleepState.states.mat.")
+        self._draw_sleep_selection()
+
+    def _update_sleep_state_file(self) -> None:
+        if self.sleep_state_data is None or self.sleep_state_path is None or self.sleep_pending_edit is None:
+            return
+        try:
+            idx = self.sleep_state_data.get("idx", {})
+            timestamps = np.asarray(idx.get("timestamps", np.asarray([])), dtype=float).reshape(-1)
+            states = np.asarray(idx.get("states", np.asarray([])), dtype=np.uint8).reshape(-1)
+            if not timestamps.size or not states.size:
+                return
+            lo, hi, state_code = self.sleep_pending_edit
+            mask = (timestamps >= lo) & (timestamps <= hi)
+            if not np.any(mask):
+                return
+            states = states.copy()
+            states[mask] = np.uint8(state_code)
+            statenames = ["WAKE", "", "NREM", "", "REM"]
+            ints = idx_to_intervals(states, timestamps, statenames)
+            self.sleep_state_data["idx"]["states"] = states.reshape(-1, 1)
+            self.sleep_state_data.setdefault("ints", {})
+            self.sleep_state_data["ints"]["WAKEstate"] = np.asarray(
+                ints.get("WAKEstate", np.empty((0, 2))), dtype=np.float64
+            ).reshape(-1, 2)
+            self.sleep_state_data["ints"]["NREMstate"] = np.asarray(
+                ints.get("NREMstate", np.empty((0, 2))), dtype=np.float64
+            ).reshape(-1, 2)
+            self.sleep_state_data["ints"]["REMstate"] = np.asarray(
+                ints.get("REMstate", np.empty((0, 2))), dtype=np.float64
+            ).reshape(-1, 2)
+            basename = self.sleep_state_path.name.replace(".SleepState.states.mat", "")
+            self.sleep_state_data, _ = append_theta_epochs(self.sleep_state_data, self.sleep_state_path.parent, basename)
+            savemat(self.sleep_state_path, {"SleepState": self.sleep_state_data}, do_compression=True)
+            states_to_episodes(self.sleep_state_data, self.sleep_state_path.parent, basename)
+        except Exception:
+            savemat(self.sleep_state_path, {"SleepState": self.sleep_state_data}, do_compression=True)
+        self.sleep_update_button.setEnabled(False)
+        self.sleep_pending_edit = None
+        self.sleep_status.setText(f"Updated {self.sleep_state_path.name}")
+        self._refresh_sleep_plot_window()
+
     def _generate_groups(self) -> None:
         self._initialize_manual_designs()
         self.groups = self._groups_from_group_designs()
+        self._reset_visible_groups()
         self._refresh_all()
 
     def _initialize_manual_designs(self) -> None:
@@ -532,6 +1086,7 @@ class MainWindow(QMainWindow):
             return
         self.group_designs = dialog.designs
         self.groups = dialog.groups()
+        self._reset_visible_groups()
         self.channel_regions = {channel: label for channel, label in self.channel_regions.items() if any(channel in group.channels for group in self.groups)}
         self._reset_colors()
         self._refresh_region_summary()
@@ -576,6 +1131,22 @@ class MainWindow(QMainWindow):
         self.bad_channels = self._parse_bad_channels()
         self._refresh_all()
 
+    def _toggle_group_visibility(self, group_index: int) -> None:
+        if not (0 <= group_index < len(self.groups)):
+            return
+        currently_visible = self._effective_visible_group_indices()
+        if group_index in currently_visible and len(currently_visible) <= 1:
+            self.statusBar().showMessage("At least one group must remain visible", 2500)
+            return
+        if group_index in self.visible_groups:
+            self.visible_groups.remove(group_index)
+            now_visible = False
+        else:
+            self.visible_groups.add(group_index)
+            now_visible = True
+        self._refresh_viewer_layout()
+        self.statusBar().showMessage(f"Group {group_index + 1} {'shown' if now_visible else 'hidden'}", 2500)
+
     def _toggle_bad_channel(self, channel: int) -> None:
         if channel in self.bad_channels:
             self.bad_channels.remove(channel)
@@ -595,46 +1166,74 @@ class MainWindow(QMainWindow):
         self._refresh_viewer_layout()
         self._load_window(silent=True)
 
+    def _reset_visible_groups(self) -> None:
+        self.visible_groups = set(range(len(self.groups)))
+
+    def _effective_visible_group_indices(self) -> set[int]:
+        all_groups = set(range(len(self.groups)))
+        if not all_groups:
+            return set()
+        active = self.visible_groups & all_groups
+        return active or all_groups
+
+    def _sleep_state_duration_seconds(self) -> float:
+        if self.sleep_state_data is None:
+            return 20.0 * 60.0
+        idx = self.sleep_state_data.get("idx", {})
+        timestamps = np.asarray(idx.get("timestamps", np.asarray([])), dtype=float).reshape(-1)
+        if timestamps.size == 0:
+            return 20.0 * 60.0
+        return max(1e-3, float(timestamps[-1] - timestamps[0]))
+
+    def _reset_sleep_view_window(self) -> None:
+        if self.sleep_state_data is None:
+            return
+        idx = self.sleep_state_data.get("idx", {})
+        timestamps = np.asarray(idx.get("timestamps", np.asarray([])), dtype=float).reshape(-1)
+        if timestamps.size == 0:
+            return
+        self.sleep_selection_range = None
+        self.sleep_pending_edit = None
+        self.sleep_manual_selection.setText("Selected range: -")
+        self.sleep_modify_button.setEnabled(False)
+        self.sleep_update_button.setEnabled(False)
+        self.sleep_window_start_seconds = float(timestamps[0])
+        self.sleep_window_duration_seconds = max(1e-3, float(timestamps[-1] - timestamps[0]))
+        self._apply_window_controls_to_widgets(self.sleep_window_start_seconds, self.sleep_window_duration_seconds)
+        self._sync_time_scroll(self._current_recording_duration_seconds())
+        self._refresh_sleep_plot_window()
+
     def _refresh_duration(self) -> None:
-        path = self.dat_path.text().strip()
-        if not path:
+        if self._is_sleep_scoring_active() and self.sleep_state_data is not None:
+            duration = self._current_recording_duration_seconds()
+            if duration is not None:
+                self.duration_label.setText(self._format_duration(duration))
+                self._sync_time_scroll(duration)
+                return
+        paths = self._active_recording_dat_paths()
+        if not paths:
             self.duration_label.setText("-")
+            self._recording_epoch_segments = []
+            self._recording_epoch_boundaries = np.asarray([], dtype=float)
+            self._refresh_recording_overview()
             self._sync_time_scroll(None)
             return
         try:
-            info = inspect_dat(
-                path,
-                self.n_channels.value(),
-                self.sampling_rate.value(),
-                allow_trailing_bytes=True,
-            )
+            infos = self._recording_dat_infos()
+            total_duration = sum(info.duration_seconds for info in infos)
         except DatReaderError as exc:
             self.duration_label.setText(str(exc))
+            self._recording_epoch_segments = []
+            self._recording_epoch_boundaries = np.asarray([], dtype=float)
+            self._refresh_recording_overview()
             self._sync_time_scroll(None)
             return
-        self.duration_label.setText(self._format_duration(info.duration_seconds))
-        self._sync_time_scroll(info.duration_seconds)
+        self._update_recording_epoch_metadata(infos)
+        self.duration_label.setText(self._format_duration(total_duration))
+        self._sync_time_scroll(total_duration)
 
     def _load_window(self, *, silent: bool = False) -> None:
-        if not self.dat_path.text().strip():
-            return
-        try:
-            window = read_dat_window(
-                self.dat_path.text().strip(),
-                self.n_channels.value(),
-                self.sampling_rate.value(),
-                self._window_start_seconds(),
-                self._window_duration_seconds(),
-                allow_trailing_bytes=True,
-            )
-        except (DatReaderError, OSError) as exc:
-            if not silent:
-                QMessageBox.critical(self, "DAT Error", str(exc))
-            return
-        self._current_time = window.time_seconds
-        self._raw_data = window.data
-        self._current_data = self._process_window_data(window.data)
-        self._refresh_viewer_layout()
+        self._load_recording_window(silent=silent)
 
     def _reprocess_current_window(self) -> None:
         raw = getattr(self, "_raw_data", None)
@@ -697,16 +1296,23 @@ class MainWindow(QMainWindow):
             layout,
             vertical_scale=self.scale.value(),
             row_spacing=self.spacing.value(),
+            show_channel_labels=self.view_mode.currentText() != "group_columns",
+            epoch_boundaries=self._recording_epoch_boundaries,
         )
-        self.probe_viewer.set_probe(self.n_channels.value(), self.groups, self.bad_channels, self.channel_colors)
+        self.probe_viewer.set_probe(
+            self.n_channels.value(),
+            self.groups,
+            self.bad_channels,
+            self.channel_colors,
+            self.visible_groups,
+        )
 
     def _visible_groups(self) -> list[ChannelGroup]:
+        visible_indices = self._effective_visible_group_indices()
+        groups = [self.groups[index] for index in sorted(visible_indices)]
         if not self.ignore_bad_channels.isChecked():
-            return self.groups
-        return [
-            ChannelGroup(group.name, [channel for channel in group.channels if channel not in self.bad_channels])
-            for group in self.groups
-        ]
+            return groups
+        return [ChannelGroup(group.name, [channel for channel in group.channels if channel not in self.bad_channels]) for group in groups]
 
     def _save_xml(self) -> None:
         result = validate_settings(
@@ -758,7 +1364,7 @@ class MainWindow(QMainWindow):
         )
         return max(0.001, duration)
 
-    def _set_window_duration_seconds(self, value: float) -> None:
+    def _set_window_duration_seconds(self, value: float, *, persist: bool = True) -> None:
         value = max(0.001, value)
         total_msec = int(round(value * 1000.0))
         minutes, rem = divmod(total_msec, 60000)
@@ -770,11 +1376,17 @@ class MainWindow(QMainWindow):
         self.duration_msec.setValue(msec)
         for widget in [self.duration_minutes, self.duration_seconds, self.duration_msec]:
             widget.blockSignals(False)
+        if persist:
+            self._store_current_window_controls()
         self._refresh_duration()
-        self._refresh_viewer_layout()
+        if self._is_sleep_scoring_active():
+            self._refresh_sleep_plot_window()
+        else:
+            self._refresh_viewer_layout()
+            self._refresh_recording_overview()
         self._update_stream_timer_interval()
 
-    def _set_window_start_seconds(self, value: float) -> None:
+    def _set_window_start_seconds(self, value: float, *, persist: bool = True) -> None:
         value = max(0.0, value)
         total_msec = int(round(value * 1000.0))
         minutes, rem = divmod(total_msec, 60000)
@@ -786,17 +1398,32 @@ class MainWindow(QMainWindow):
         self.start_msec.setValue(msec)
         for widget in [self.start_minutes, self.start_seconds, self.start_msec]:
             widget.blockSignals(False)
+        if persist:
+            self._store_current_window_controls()
         self._refresh_duration()
-        self._refresh_viewer_layout()
+        if self._is_sleep_scoring_active():
+            self._refresh_sleep_plot_window()
+        else:
+            self._refresh_viewer_layout()
+            self._refresh_recording_overview()
 
     def _time_controls_changed(self) -> None:
+        self._store_current_window_controls()
         self._refresh_duration()
-        self._refresh_viewer_layout()
+        if self._is_sleep_scoring_active():
+            self._refresh_sleep_plot_window()
+        else:
+            self._refresh_viewer_layout()
+            self._refresh_recording_overview()
         self._update_stream_timer_interval()
 
     def _apply_window_controls(self) -> None:
+        self._store_current_window_controls()
         self._refresh_duration()
-        self._load_window(silent=False)
+        if self._is_sleep_scoring_active():
+            self._refresh_sleep_plot_window()
+        else:
+            self._load_window(silent=False)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         if self._handle_navigation_key(event):
@@ -819,6 +1446,13 @@ class MainWindow(QMainWindow):
         if delta == 0:
             return False
         modifiers = event.modifiers()
+        if hasattr(self, "sleep_viewer") and (watched is self.sleep_viewer or self.sleep_viewer.isAncestorOf(watched)):
+            if not (modifiers & Qt.KeyboardModifier.ControlModifier) and not (modifiers & Qt.KeyboardModifier.ShiftModifier):
+                x_pos = int(event.position().toPoint().x()) if hasattr(event, "position") else 0
+                anchor_fraction = self.sleep_viewer.x_fraction_at_x(x_pos)
+                self._zoom_time_window(0.8 if delta > 0 else 1.25, anchor_fraction=anchor_fraction)
+                event.accept()
+                return True
         if modifiers & Qt.KeyboardModifier.ControlModifier:
             self._zoom_time_window(0.8 if delta > 0 else 1.25)
             event.accept()
@@ -833,6 +1467,8 @@ class MainWindow(QMainWindow):
         return False
 
     def _is_signal_view_wheel_target(self, watched: QWidget) -> bool:
+        if hasattr(self, "sleep_viewer") and (watched is self.sleep_viewer or self.sleep_viewer.isAncestorOf(watched)):
+            return True
         if watched is self.viewer or self.viewer.isAncestorOf(watched):
             return True
         viewport = self.signal_scroll.viewport()
@@ -856,10 +1492,10 @@ class MainWindow(QMainWindow):
                 self.spacing.setValue(max(self.spacing.minimum(), self.spacing.value() / 1.15))
                 return True
         if event.key() == Qt.Key.Key_Right:
-            self._scroll_time(self._window_duration_seconds())
+            self._scroll_time(self._window_duration_seconds() * 0.25)
             return True
         if event.key() == Qt.Key.Key_Left:
-            self._scroll_time(-self._window_duration_seconds())
+            self._scroll_time(-self._window_duration_seconds() * 0.25)
             return True
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier and event.key() == Qt.Key.Key_End:
             self._go_to_latest_window()
@@ -874,20 +1510,28 @@ class MainWindow(QMainWindow):
 
     def _scroll_time(self, delta_seconds: float) -> None:
         self._set_window_start_seconds(self._window_start_seconds() + delta_seconds)
-        if getattr(self, "_current_data", None) is not None and self.dat_path.text().strip():
+        if self._is_sleep_scoring_active():
+            self._refresh_sleep_plot_window()
+        elif getattr(self, "_current_data", None) is not None and self.dat_path.text().strip():
             self._load_window(silent=True)
 
-    def _zoom_time_window(self, factor: float) -> None:
+    def _zoom_time_window(self, factor: float, *, anchor_fraction: float = 0.0) -> None:
         old_duration = self._window_duration_seconds()
         new_duration = max(0.001, old_duration * factor)
         recording_duration = self._current_recording_duration_seconds()
         if recording_duration is not None:
             new_duration = min(new_duration, max(0.001, recording_duration))
         start = self._window_start_seconds()
+        anchor_fraction = max(0.0, min(1.0, float(anchor_fraction)))
+        anchor_time = start + old_duration * anchor_fraction
         max_start = max(0.0, (recording_duration or float("inf")) - new_duration)
+        new_start = anchor_time - new_duration * anchor_fraction
         self._set_window_duration_seconds(new_duration)
-        self._set_window_start_seconds(max(0.0, min(max_start, start)))
-        self._load_window(silent=True)
+        self._set_window_start_seconds(max(0.0, min(max_start, new_start)))
+        if self._is_sleep_scoring_active():
+            self._refresh_sleep_plot_window()
+        else:
+            self._load_window(silent=True)
 
     def _scroll_traces(self, delta_pixels: int) -> None:
         bar = self.signal_scroll.verticalScrollBar()
@@ -906,7 +1550,10 @@ class MainWindow(QMainWindow):
         max_start = max(0.0, duration - self._window_duration_seconds())
         start = max_start * (value / max(1, self.time_scroll.maximum()))
         self._set_window_start_seconds(start)
-        self._load_window(silent=True)
+        if self._is_sleep_scoring_active():
+            self._refresh_sleep_plot_window()
+        else:
+            self._load_window(silent=True)
 
     def _sync_time_scroll(self, recording_duration_seconds: float | None) -> None:
         if not hasattr(self, "time_scroll"):
@@ -924,35 +1571,37 @@ class MainWindow(QMainWindow):
         self._updating_time_scroll = False
 
     def _current_recording_duration_seconds(self) -> float | None:
-        path = self.dat_path.text().strip()
-        if not path:
+        if self._is_sleep_scoring_active() and self.sleep_state_data is not None:
+            timestamps = np.asarray(self.sleep_state_data.get("idx", {}).get("timestamps", np.asarray([])), dtype=float).reshape(-1)
+            if timestamps.size:
+                return float(timestamps[-1])
+        paths = self._active_recording_dat_paths()
+        if not paths:
             return None
         try:
-            info = inspect_dat(
-                path,
-                self.n_channels.value(),
-                self.sampling_rate.value(),
-                allow_trailing_bytes=True,
-            )
+            infos = self._recording_dat_infos()
         except DatReaderError:
             return None
-        return info.duration_seconds
+        return sum(info.duration_seconds for info in infos)
 
     def _go_to_latest_window(self) -> None:
-        path = self.dat_path.text().strip()
-        if not path:
+        if self._is_sleep_scoring_active():
+            duration = self._current_recording_duration_seconds()
+            if duration is None:
+                return
+            start = max(0.0, duration - self._window_duration_seconds())
+            self._set_window_start_seconds(start)
+            self._refresh_sleep_plot_window()
+            return
+        paths = self._active_recording_dat_paths()
+        if not paths:
             return
         try:
-            info = inspect_dat(
-                path,
-                self.n_channels.value(),
-                self.sampling_rate.value(),
-                allow_trailing_bytes=True,
-            )
+            duration = sum(info.duration_seconds for info in self._recording_dat_infos())
         except DatReaderError as exc:
             QMessageBox.critical(self, "DAT Error", str(exc))
             return
-        start = max(0.0, info.duration_seconds - self._window_duration_seconds())
+        start = max(0.0, duration - self._window_duration_seconds())
         self._set_window_start_seconds(start)
         self._load_window(silent=False)
 
@@ -971,19 +1620,14 @@ class MainWindow(QMainWindow):
         self.stream_timer.setInterval(interval_ms)
 
     def _stream_latest_window(self) -> None:
-        path = self.dat_path.text().strip()
-        if not path:
+        paths = self._active_recording_dat_paths()
+        if not paths:
             return
         try:
-            info = inspect_dat(
-                path,
-                self.n_channels.value(),
-                self.sampling_rate.value(),
-                allow_trailing_bytes=True,
-            )
+            duration = sum(info.duration_seconds for info in self._recording_dat_infos())
         except DatReaderError:
             return
-        start = max(0.0, info.duration_seconds - self._window_duration_seconds())
+        start = max(0.0, duration - self._window_duration_seconds())
         self._set_window_start_seconds(start)
         self._load_window(silent=True)
 
@@ -1015,7 +1659,8 @@ class MainWindow(QMainWindow):
         )
 
     def _metadata(self) -> RecordingMetadata:
-        path = self.dat_path.text().strip() or None
+        paths = self._active_recording_dat_paths()
+        path = str(paths[0]) if paths else None
         return RecordingMetadata(
             dat_path=path,
             n_channels=self.n_channels.value(),
