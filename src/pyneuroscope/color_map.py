@@ -18,6 +18,15 @@ DEFAULT_PALETTE = [
 ]
 
 COLOR_MAPS = {
+    "white": ["#cfd5df"],
+    "black": ["#394150"],
+    "rainbow": ["#2d5bff", "#00a4ff", "#00d084", "#d8e52d", "#ff9d00", "#ff3d3d", "#b032ff"],
+    "Greys": ["#f7f7f7", "#d9d9d9", "#969696", "#525252", "#111111"],
+    "Purples": ["#fcfbfd", "#dadaeb", "#9e9ac8", "#6a51a3", "#3f007d"],
+    "Blues": ["#f7fbff", "#c6dbef", "#6baed6", "#2171b5", "#08306b"],
+    "Greens": ["#f7fcf5", "#c7e9c0", "#74c476", "#238b45", "#00441b"],
+    "Oranges": ["#fff5eb", "#fdd0a2", "#fd8d3c", "#d94801", "#7f2704"],
+    "Reds": ["#fff5f0", "#fcbba1", "#fb6a4a", "#cb181d", "#67000d"],
     "spring": ["#ff00ff", "#ff40bf", "#ff8080", "#ffbf40", "#ffff00"],
     "summer": ["#008066", "#40a666", "#80cc66", "#bff266", "#ffff66"],
     "autumn": ["#ff0000", "#ff4000", "#ff8000", "#ffbf00", "#ffff00"],

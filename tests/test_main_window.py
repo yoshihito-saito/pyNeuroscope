@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 from pyneuroscope.dat_reader import DatReaderError
 from pyneuroscope.main_window import MainWindow
-from pyneuroscope.models import ChannelGroup
+from pyneuroscope.models import ChannelGroup, SpikeUnit, SpikesData
 
 
 class WheelEvent:
@@ -118,10 +118,92 @@ def test_recording_discovery_ignores_basename_dat_in_folder(monkeypatch: pytest.
     monkeypatch.setattr(Path, "is_file", lambda self: False)
     monkeypatch.setattr(Path, "exists", lambda self: self == selected)
     monkeypatch.setattr(Path, "is_dir", lambda self: self == selected)
-    monkeypatch.setattr(Path, "rglob", lambda self, pattern: [] if pattern == "amplifier.dat" else [self / "basename.dat"])
+    monkeypatch.setattr(Path, "iterdir", lambda self: [self / "basename.dat"])
 
     with pytest.raises(DatReaderError, match="No amplifier.dat"):
         window._resolve_recording_dat_paths(selected)
+
+
+def test_recording_discovery_checks_only_one_folder_level(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    window = MainWindow()
+    first = tmp_path / "pisco_linear_track_260514_142413"
+    second = tmp_path / "pisco_postsleep_260514_144740"
+    nested = second / "original_dat"
+    first.mkdir()
+    second.mkdir()
+    nested.mkdir()
+    first_dat = first / "amplifier.dat"
+    second_dat = second / "amplifier.dat"
+    nested_dat = nested / "amplifier.dat"
+    first_dat.write_bytes(b"\0" * 16)
+    second_dat.write_bytes(b"\0" * 16)
+    nested_dat.write_bytes(b"\0" * 16)
+
+    assert window._resolve_recording_dat_paths(tmp_path) == [first_dat, second_dat]
+
+
+def test_parent_anatomical_map_is_auto_resolved(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    window = MainWindow()
+    session = tmp_path / "day"
+    subsession = session / "rec_260101_120000"
+    subsession.mkdir(parents=True)
+    dat_path = subsession / "amplifier.dat"
+    dat_path.write_bytes(b"\0" * 16)
+    (session / "anatomical_map.csv").write_text("CA1\n", encoding="utf-8")
+    window.dat_path.blockSignals(True)
+    window.dat_path.setText(str(session))
+    window.dat_path.blockSignals(False)
+    window.groups = [ChannelGroup("group1", [0])]
+
+    window._load_adjacent_anatomical_map_if_present(dat_path)
+
+    assert window.channel_regions == {0: "CA1"}
+
+
+def test_screenshot_filename_helpers() -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    window = MainWindow()
+
+    assert window._duration_slug(65.432) == "1min-5sec-432ms"
+    assert window._screenshot_path_with_suffix(Path("shot.pdf"), "PNG image (*.png)") == Path("shot.png")
+    assert window._screenshot_path_with_suffix(Path("shot"), "PNG image (*.png)") == Path("shot.png")
+
+
+def test_screenshot_default_directory_uses_recording_path(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    window = MainWindow()
+    window.dat_path.blockSignals(True)
+    window.dat_path.setText(str(tmp_path))
+    window.dat_path.blockSignals(False)
+
+    assert window._default_screenshot_path().parent == tmp_path
+
+
+def test_hidden_probe_group_hides_detected_spikes() -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    window = MainWindow()
+    window.groups = [ChannelGroup("g1", [0]), ChannelGroup("g2", [1])]
+    window.visible_groups = {0}
+    window.spikes_data = SpikesData(
+        path=Path("spikes.mat"),
+        basename="test",
+        units=[
+            SpikeUnit(1, "u1", np.asarray([0.1]), channel=0),
+            SpikeUnit(2, "u2", np.asarray([0.2]), channel=1),
+        ],
+    )
+    window.show_spikes.setChecked(True)
+
+    window._refresh_spike_overlay()
+
+    assert [unit.unit_id for unit in window.viewer._spike_overlays] == [1]
 
 
 def test_shift_wheel_changes_row_spacing() -> None:
@@ -140,7 +222,7 @@ def test_sleep_viewer_wheel_zooms_time_window_without_modifiers() -> None:
     app = QApplication.instance() or QApplication([])
     _ = app
     window = MainWindow()
-    window.left_tabs.setCurrentIndex(1)
+    window.left_tabs.setCurrentIndex(window.left_tabs.indexOf(window.sleep_tab))
     window.sleep_state_data = {
         "idx": {
             "timestamps": np.asarray([0.0, 10.0, 20.0], dtype=float),
@@ -301,7 +383,7 @@ def test_sleep_tab_dat_commit_without_adjacent_state_clears_sleep_context(monkey
     dat_path = Path("recording.dat")
     window.sleep_state_data = {"idx": {"timestamps": np.asarray([0.0, 1.0]), "states": np.asarray([1, 3])}}
     window.sleep_state_path = Path("old.SleepState.states.mat")
-    window.left_tabs.setCurrentIndex(1)
+    window.left_tabs.setCurrentIndex(window.left_tabs.indexOf(window.sleep_tab))
     window.dat_path.setText(str(dat_path))
     monkeypatch.setattr(window, "_resolve_recording_dat_paths", lambda path: [path])
     monkeypatch.setattr(window, "_recording_dat_infos", lambda: [SimpleNamespace(duration_seconds=1.0)])

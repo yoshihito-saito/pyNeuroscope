@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -43,7 +44,8 @@ from .color_map import (
 )
 from .channel_map_editor import ChannelMapDialog, GroupDesign, group_designs_from_groups
 from .dat_reader import DatReaderError, inspect_dat, read_dat_window
-from .models import ChannelGroup, RecordingMetadata
+from .event_io import EventLoadError, candidate_analysis_dirs, find_event_files, find_spikes_file, load_event_file, load_spikes_cellinfo
+from .models import ChannelGroup, EventSeries, RecordingMetadata, SignalEventOverlay, SignalSpikeOverlay, SpikesData
 from .probe_viewer import ProbeViewer
 from .recording_overview import RecordingOverviewWidget
 from .signal_layout import group_column_layout, single_column_layout
@@ -86,6 +88,10 @@ class MainWindow(QMainWindow):
         self.sleep_selection_patches: list = []
         self.sleep_span_selectors: list = []
         self.sleep_pending_edit: tuple[float, float, int] | None = None
+        self.spikes_data: SpikesData | None = None
+        self.event_series: list[EventSeries] = []
+        self.event_controls: dict[str, dict[str, QCheckBox]] = {}
+        self.spike_group_cmaps: dict[str, QComboBox] = {}
         self._build_ui()
         QApplication.instance().installEventFilter(self)
         self._generate_groups()
@@ -135,8 +141,14 @@ class MainWindow(QMainWindow):
         self.left_tabs.tabBar().setElideMode(Qt.TextElideMode.ElideNone)
         self.left_tabs.tabBar().setExpanding(False)
         self.left_tabs.tabBar().setStyleSheet("QTabBar::tab { padding: 5px 8px; font-size: 12px; }")
-        self.left_tabs.addTab(self._build_recording_tab(), "Recording")
-        self.left_tabs.addTab(self._build_sleep_scoring_tab(), "State editor")
+        self.recording_tab = self._build_recording_tab()
+        self.spikes_tab = self._build_spikes_tab()
+        self.events_tab = self._build_events_tab()
+        self.sleep_tab = self._build_sleep_scoring_tab()
+        self.left_tabs.addTab(self.recording_tab, "Recording")
+        self.left_tabs.addTab(self.spikes_tab, "Spikes")
+        self.left_tabs.addTab(self.events_tab, "Events")
+        self.left_tabs.addTab(self.sleep_tab, "State editor")
         self.left_tabs.currentChanged.connect(self._left_tab_changed)
         layout.addWidget(self.left_tabs, 1)
         return panel
@@ -275,6 +287,81 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.region_summary)
         return panel
 
+    def _build_spikes_tab(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setSpacing(8)
+        info = QLabel("Loads basename.spikes.cellinfo.mat and displays units as trace-aligned ticks or a compact raster.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #b8c7da;")
+        self.spikes_status = QLabel("Spikes: not loaded")
+        self.spikes_status.setWordWrap(True)
+        self.show_spikes = QCheckBox("Show spikes")
+        self.spikes_below = QCheckBox("Below traces")
+        self.spikes_show_waveforms = QCheckBox("Show waveform")
+        self.spikes_per_region = QCheckBox("Per region")
+        self.spikes_per_group = QCheckBox("Per probe group")
+        self.spikes_cmap = QComboBox()
+        self.spikes_cmap.addItems(COLOR_MAP_NAMES)
+        self.spikes_cmap.setCurrentText("rainbow")
+        for widget in [self.show_spikes, self.spikes_show_waveforms, self.spikes_per_region, self.spikes_per_group]:
+            widget.toggled.connect(self._refresh_spike_overlay)
+        self.spikes_below.toggled.connect(self._spikes_below_changed)
+        self.spikes_per_region.toggled.connect(lambda checked: self._spike_grouping_changed("region", checked))
+        self.spikes_per_group.toggled.connect(lambda checked: self._spike_grouping_changed("group", checked))
+        self.spikes_cmap.currentTextChanged.connect(self._refresh_spike_overlay)
+        self.spike_group_cmap_panel = QWidget()
+        self.spike_group_cmap_layout = QFormLayout(self.spike_group_cmap_panel)
+
+        layout.addWidget(info)
+        layout.addWidget(self.spikes_status)
+        layout.addWidget(self.show_spikes)
+        layout.addWidget(self.spikes_below)
+        layout.addWidget(self.spikes_show_waveforms)
+        layout.addWidget(QLabel("Default unit colormap"))
+        layout.addWidget(self.spikes_cmap)
+        layout.addWidget(self.spikes_per_region)
+        layout.addWidget(self.spikes_per_group)
+        layout.addWidget(self.spike_group_cmap_panel)
+        layout.addStretch(1)
+        return panel
+
+    def _build_events_tab(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setSpacing(8)
+        info = QLabel("Loads basename.*.events.mat. Intervals shade timestamp start-end; peaks draw timing lines.")
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #b8c7da;")
+        self.events_status = QLabel("Events: not loaded")
+        self.events_status.setWordWrap(True)
+        self.events_list = QWidget()
+        self.events_list_layout = QGridLayout(self.events_list)
+        self.events_list_layout.setContentsMargins(0, 0, 0, 0)
+        self.events_list_layout.setHorizontalSpacing(6)
+        self.events_list_layout.setVerticalSpacing(3)
+        self.event_id_text = QLineEdit()
+        self.event_id_text.setPlaceholderText("Event ID")
+        self.event_id_text.returnPressed.connect(self._jump_to_event_id)
+        previous_event = QPushButton("←")
+        previous_event.setText("<")
+        previous_event.clicked.connect(lambda: self._step_event_id(-1))
+        next_event = QPushButton("→")
+        next_event.setText(">")
+        next_event.clicked.connect(lambda: self._step_event_id(1))
+        jump_row = QHBoxLayout()
+        jump_row.addWidget(previous_event)
+        jump_row.addWidget(self.event_id_text, 1)
+        jump_row.addWidget(next_event)
+
+        layout.addWidget(info)
+        layout.addWidget(self.events_status)
+        layout.addWidget(self.events_list)
+        layout.addWidget(QLabel("Jump to event"))
+        layout.addLayout(jump_row)
+        layout.addStretch(1)
+        return panel
+
     def _build_sleep_scoring_tab(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
@@ -358,6 +445,10 @@ class MainWindow(QMainWindow):
         self.view_mode = QComboBox()
         self.view_mode.addItems(["single_column", "group_columns"])
         self.view_mode.currentTextChanged.connect(self._view_mode_changed)
+        self.signal_background = QComboBox()
+        self.signal_background.addItems(["black", "white"])
+        self.signal_background.setCurrentText("black")
+        self.signal_background.currentTextChanged.connect(self._signal_background_changed)
         self.scale = QDoubleSpinBox()
         self.scale.setRange(0.05, 20)
         self.scale.setDecimals(2)
@@ -372,6 +463,8 @@ class MainWindow(QMainWindow):
         self.spacing.valueChanged.connect(self._spacing_changed)
         mode_row.addWidget(QLabel("View"))
         mode_row.addWidget(self.view_mode)
+        mode_row.addWidget(QLabel("Background"))
+        mode_row.addWidget(self.signal_background)
         mode_row.addWidget(QLabel("Scale"))
         mode_row.addWidget(self.scale)
         mode_row.addWidget(QLabel("Spacing"))
@@ -442,7 +535,7 @@ class MainWindow(QMainWindow):
         self.probe_viewer.groupClicked.connect(self._toggle_group_visibility)
         self.color_map = QComboBox()
         self.color_map.addItems(COLOR_MAP_NAMES)
-        self.color_map.setCurrentText("spring")
+        self.color_map.setCurrentText("summer")
         self.color_map.currentTextChanged.connect(self._reset_colors)
         self.color_mode = QComboBox()
         self.color_mode.addItems(["all", "group"])
@@ -484,12 +577,20 @@ class MainWindow(QMainWindow):
         direct_dat = selected_path / "amplifier.dat"
         if direct_dat.exists():
             return [direct_dat]
+        try:
+            children = list(selected_path.iterdir())
+        except OSError as exc:
+            raise DatReaderError(f"Could not inspect folder: {selected_path}") from exc
         matches = sorted(
-            (path for path in selected_path.rglob("amplifier.dat") if path.is_file()),
+            (
+                child / "amplifier.dat"
+                for child in children
+                if child.is_dir() and (child / "amplifier.dat").is_file()
+            ),
             key=self._recording_session_sort_key,
         )
         if not matches:
-            raise DatReaderError(f"No amplifier.dat found under: {selected_path}")
+            raise DatReaderError(f"No amplifier.dat found directly under: {selected_path}")
         return matches
 
     def _recording_session_sort_key(self, path: Path) -> tuple:
@@ -658,6 +759,7 @@ class MainWindow(QMainWindow):
         primary_dat_path = self._recording_dat_paths[0]
         self._load_adjacent_xml_if_present(primary_dat_path)
         self._load_adjacent_anatomical_map_if_present(primary_dat_path)
+        self._load_adjacent_spikes_and_events()
         if self._is_sleep_scoring_active():
             self._clear_sleep_state_context()
             self.sleep_status.setText("DAT selected. Load an existing SleepState.states.mat file when needed.")
@@ -675,7 +777,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "center_stack"):
             return
         self._store_current_window_controls(self._active_left_tab_index)
-        if index == 1:
+        if self._is_sleep_tab_index(index):
             self._apply_window_controls_to_widgets(self.sleep_window_start_seconds, self.sleep_window_duration_seconds)
             self.center_stack.setCurrentIndex(1)
             self._refresh_sleep_plot_window()
@@ -685,6 +787,12 @@ class MainWindow(QMainWindow):
             self._load_window(silent=True)
         self._active_left_tab_index = index
         self._sync_time_scroll(self._current_recording_duration_seconds())
+
+    def _is_sleep_tab_index(self, index: int) -> bool:
+        return hasattr(self, "left_tabs") and hasattr(self, "sleep_tab") and index == self.left_tabs.indexOf(self.sleep_tab)
+
+    def _is_events_active(self) -> bool:
+        return hasattr(self, "left_tabs") and hasattr(self, "events_tab") and self.left_tabs.currentIndex() == self.left_tabs.indexOf(self.events_tab)
 
     def _default_sleep_state_path(self) -> Path | None:
         paths = self._active_recording_dat_paths()
@@ -847,12 +955,12 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Loaded anatomical map: {Path(path).name}", 5000)
 
     def _load_adjacent_anatomical_map_if_present(self, dat_path: Path) -> None:
-        csv_path = dat_path.parent / "anatomical_map.csv"
         if not self.groups:
             self.channel_regions = {}
             self._refresh_region_summary()
             return
-        if not csv_path.exists():
+        csv_path = self._resolve_adjacent_anatomical_map_path(dat_path)
+        if csv_path is None:
             self.channel_regions = {}
             self._refresh_region_summary()
             return
@@ -861,6 +969,325 @@ class MainWindow(QMainWindow):
         except AnatomicalMapError:
             self.channel_regions = {}
         self._refresh_region_summary()
+
+    def _resolve_adjacent_anatomical_map_path(self, dat_path: Path) -> Path | None:
+        candidates: list[Path] = []
+        selected_text = self.dat_path.text().strip()
+        if selected_text:
+            selected_path = Path(selected_text)
+            if selected_path.is_dir():
+                candidates.append(selected_path / "anatomical_map.csv")
+            else:
+                candidates.append(selected_path.parent / "anatomical_map.csv")
+        candidates.extend(
+            [
+                dat_path.parent / "anatomical_map.csv",
+                dat_path.parent.parent / "anatomical_map.csv",
+            ]
+        )
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
+
+    def _load_adjacent_spikes_and_events(self) -> None:
+        path_text = self.dat_path.text().strip()
+        if not path_text:
+            return
+        selected_path = Path(path_text)
+        dat_paths = self._active_recording_dat_paths()
+        basenames = self._analysis_basenames(selected_path, dat_paths)
+        base_dirs = candidate_analysis_dirs(selected_path, dat_paths)
+
+        self.spikes_data = None
+        spikes_file = find_spikes_file(base_dirs, basenames)
+        if spikes_file is not None:
+            try:
+                self.spikes_data = load_spikes_cellinfo(spikes_file)
+                self.spikes_status.setText(f"Spikes: {len(self.spikes_data.units)} units from {spikes_file.name}")
+            except EventLoadError as exc:
+                self.spikes_status.setText(f"Spikes: {exc}")
+        else:
+            self.spikes_status.setText("Spikes: not found")
+
+        self.event_series = []
+        errors: list[str] = []
+        for event_file in find_event_files(base_dirs, basenames):
+            try:
+                self.event_series.append(load_event_file(event_file))
+            except EventLoadError as exc:
+                errors.append(str(exc))
+        if self.event_series:
+            names = ", ".join(event.name for event in self.event_series)
+            self.events_status.setText(f"Events: {names}")
+        elif errors:
+            self.events_status.setText(f"Events: {errors[0]}")
+        else:
+            self.events_status.setText("Events: not found")
+        self._rebuild_event_controls()
+        self._refresh_spike_group_cmap_controls()
+        self._refresh_event_overlay()
+        self._refresh_spike_overlay()
+
+    def _analysis_basenames(self, selected_path: Path, dat_paths: list[Path]) -> list[str]:
+        names: list[str] = []
+        if selected_path.name:
+            names.append(selected_path.stem if selected_path.is_file() else selected_path.name)
+        for dat_path in dat_paths:
+            names.append(dat_path.parent.name)
+            names.append(dat_path.parent.parent.name)
+        result: list[str] = []
+        for name in names:
+            if name and name not in result:
+                result.append(name)
+        return result
+
+    def _rebuild_event_controls(self) -> None:
+        while self.events_list_layout.count():
+            item = self.events_list_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.event_controls = {}
+        headers = ["Name", "Show", "Intervals", "Peaks", "Below"]
+        for column, header in enumerate(headers):
+            label = QLabel(header)
+            label.setStyleSheet("font-weight: 600; color: #d6dde8;")
+            self.events_list_layout.addWidget(label, 0, column)
+        for row, event in enumerate(self.event_series, start=1):
+            show = QCheckBox()
+            intervals = QCheckBox()
+            peaks = QCheckBox()
+            below = QCheckBox()
+            show.setChecked(False)
+            intervals.setChecked(True)
+            peaks.setChecked(event.peaks is not None)
+            below.setChecked(True)
+            if event.peaks is None:
+                peaks.setEnabled(False)
+            for checkbox in [show, intervals, peaks, below]:
+                checkbox.toggled.connect(self._refresh_event_overlay)
+            name = QLabel(f"{event.name} ({event.timestamps.shape[0]})")
+            self.events_list_layout.addWidget(name, row, 0)
+            self.events_list_layout.addWidget(show, row, 1)
+            self.events_list_layout.addWidget(intervals, row, 2)
+            self.events_list_layout.addWidget(peaks, row, 3)
+            self.events_list_layout.addWidget(below, row, 4)
+            self.event_controls[event.name] = {
+                "show": show,
+                "intervals": intervals,
+                "peaks": peaks,
+                "below": below,
+            }
+
+    def _spike_grouping_changed(self, mode: str, checked: bool) -> None:
+        if checked and mode == "region" and self.spikes_per_group.isChecked():
+            self.spikes_per_group.blockSignals(True)
+            self.spikes_per_group.setChecked(False)
+            self.spikes_per_group.blockSignals(False)
+        if checked and mode == "group" and self.spikes_per_region.isChecked():
+            self.spikes_per_region.blockSignals(True)
+            self.spikes_per_region.setChecked(False)
+            self.spikes_per_region.blockSignals(False)
+        self._refresh_spike_group_cmap_controls()
+
+    def _spikes_below_changed(self, checked: bool) -> None:
+        if checked:
+            self.spikes_show_waveforms.blockSignals(True)
+            self.spikes_show_waveforms.setChecked(False)
+            self.spikes_show_waveforms.setEnabled(False)
+            self.spikes_show_waveforms.blockSignals(False)
+        else:
+            self.spikes_show_waveforms.setEnabled(True)
+        self._refresh_spike_overlay()
+
+    def _refresh_spike_group_cmap_controls(self) -> None:
+        if not hasattr(self, "spike_group_cmap_layout"):
+            return
+        while self.spike_group_cmap_layout.count():
+            item = self.spike_group_cmap_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.spike_group_cmaps = {}
+        groups = self._spike_color_groups()
+        if len(groups) <= 1:
+            self.spike_group_cmap_panel.setVisible(False)
+            self._refresh_spike_overlay()
+            return
+        self.spike_group_cmap_panel.setVisible(True)
+        for label in groups:
+            combo = QComboBox()
+            combo.addItems(COLOR_MAP_NAMES)
+            combo.setCurrentText(self.spikes_cmap.currentText())
+            combo.currentTextChanged.connect(self._refresh_spike_overlay)
+            self.spike_group_cmap_layout.addRow(label, combo)
+            self.spike_group_cmaps[label] = combo
+        self._refresh_spike_overlay()
+
+    def _spike_color_groups(self) -> list[str]:
+        if self.spikes_data is None:
+            return []
+        if self.spikes_per_region.isChecked():
+            region_order: list[str] = []
+            for group in self.groups:
+                for channel in group.channels:
+                    region = self.channel_regions.get(channel)
+                    if not region:
+                        continue
+                    if any(unit.channel == channel for unit in self.spikes_data.units) and region not in region_order:
+                        region_order.append(region)
+            if any(
+                self._spike_group_label(unit) == "unassigned region"
+                for unit in self.spikes_data.units
+                if self._spike_unit_is_visible(unit)
+            ):
+                region_order.append("unassigned region")
+            return region_order
+        if self.spikes_per_group.isChecked():
+            labels: list[str] = []
+            for index, group in enumerate(self.groups):
+                if any(self._probe_group_for_channel(unit.channel) == index for unit in self.spikes_data.units):
+                    labels.append(group.name)
+            fallback_labels = [
+                self._spike_group_label(unit)
+                for unit in self.spikes_data.units
+                if self._probe_group_for_channel(unit.channel) is None
+            ]
+            for label in fallback_labels:
+                if label not in labels:
+                    labels.append(label)
+            return labels
+        labels = [self._spike_group_label(unit) for unit in self.spikes_data.units]
+        result: list[str] = []
+        for label in labels:
+            if label not in result:
+                result.append(label)
+        return result
+
+    def _spike_group_label(self, unit) -> str:
+        if self.spikes_per_region.isChecked():
+            if unit.channel is not None:
+                region = self.channel_regions.get(unit.channel)
+                if region:
+                    return region
+            return "unassigned region"
+        if self.spikes_per_group.isChecked():
+            group_index = self._probe_group_for_channel(unit.channel)
+            if group_index is not None:
+                return self.groups[group_index].name
+            if unit.group is not None:
+                return f"group {unit.group}"
+            return "unassigned group"
+        return "all units"
+
+    def _probe_group_for_channel(self, channel: int | None) -> int | None:
+        if channel is None:
+            return None
+        for index, group in enumerate(self.groups):
+            if channel in group.channels:
+                return index
+        return None
+
+    def _spike_unit_is_visible(self, unit) -> bool:
+        group_index = self._probe_group_for_channel(unit.channel)
+        if group_index is None:
+            return True
+        return group_index in self._effective_visible_group_indices()
+
+    def _refresh_spike_overlay(self) -> None:
+        if not hasattr(self, "viewer"):
+            return
+        overlays: list[SignalSpikeOverlay] = []
+        if self.spikes_data is not None:
+            groups: dict[str, list] = {}
+            for unit in self.spikes_data.units:
+                if not self._spike_unit_is_visible(unit):
+                    continue
+                groups.setdefault(self._spike_group_label(unit), []).append(unit)
+            for group_label, units in groups.items():
+                cmap = self.spike_group_cmaps.get(group_label)
+                cmap_name = cmap.currentText() if cmap is not None else self.spikes_cmap.currentText()
+                colors = palette_from_name(cmap_name, max(1, len(units)))
+                for index, unit in enumerate(units):
+                    overlays.append(
+                        SignalSpikeOverlay(
+                            unit_id=unit.uid,
+                            label=unit.label,
+                            times=unit.times,
+                            color=colors[index % len(colors)],
+                            channel=unit.channel,
+                        )
+                    )
+        self.viewer.set_spike_overlays(
+            overlays,
+            show=self.show_spikes.isChecked() if hasattr(self, "show_spikes") else False,
+            below=self.spikes_below.isChecked() if hasattr(self, "spikes_below") else False,
+            show_waveforms=(
+                self.spikes_show_waveforms.isChecked()
+                if hasattr(self, "spikes_show_waveforms") and not self.spikes_below.isChecked()
+                else False
+            ),
+        )
+
+    def _refresh_event_overlay(self) -> None:
+        if not hasattr(self, "viewer"):
+            return
+        overlays: list[SignalEventOverlay] = []
+        for index, event in enumerate(self.event_series):
+            controls = self.event_controls.get(event.name)
+            if controls is None or not controls["show"].isChecked():
+                continue
+            overlays.append(
+                SignalEventOverlay(
+                    name=event.name,
+                    color=self._event_overlay_color(),
+                    timestamps=event.timestamps,
+                    peaks=event.peaks,
+                    show_intervals=controls["intervals"].isChecked(),
+                    show_peaks=controls["peaks"].isChecked(),
+                    below=controls["below"].isChecked(),
+                )
+            )
+        self.viewer.set_event_overlays(overlays)
+
+    def _event_overlay_color(self) -> str:
+        background = self.signal_background.currentText() if hasattr(self, "signal_background") else "black"
+        return "#20242a" if background == "white" else "#ffffff"
+
+    def _primary_event_for_navigation(self) -> EventSeries | None:
+        for event in self.event_series:
+            controls = self.event_controls.get(event.name)
+            if controls is not None and controls["show"].isChecked():
+                return event
+        return self.event_series[0] if self.event_series else None
+
+    def _jump_to_event_id(self) -> None:
+        event = self._primary_event_for_navigation()
+        if event is None:
+            return
+        try:
+            event_id = int(self.event_id_text.text().strip())
+        except ValueError:
+            return
+        event_id = max(1, min(event.timestamps.shape[0], event_id))
+        self.event_id_text.setText(str(event_id))
+        start, end = event.timestamps[event_id - 1]
+        center = (float(start) + float(end)) * 0.5
+        self._set_window_start_seconds(max(0.0, center - self._window_duration_seconds() * 0.5))
+        self._load_window(silent=True)
+
+    def _step_event_id(self, step: int) -> None:
+        event = self._primary_event_for_navigation()
+        if event is None:
+            return
+        try:
+            current = int(self.event_id_text.text().strip())
+        except ValueError:
+            current = 1
+        next_id = max(1, min(event.timestamps.shape[0], current + step))
+        self.event_id_text.setText(str(next_id))
+        self._jump_to_event_id()
 
     def _refresh_region_summary(self) -> None:
         if not hasattr(self, "region_summary"):
@@ -872,15 +1299,19 @@ class MainWindow(QMainWindow):
                 counts[clean] = counts.get(clean, 0) + 1
         if not counts:
             self.region_summary.setText("No regions assigned")
+            if hasattr(self, "spike_group_cmap_layout"):
+                self._refresh_spike_group_cmap_controls()
             return
         summary = ", ".join(f"{name}: {count}" for name, count in sorted(counts.items()))
         self.region_summary.setText(f"Assigned channels: {summary}")
+        if hasattr(self, "spike_group_cmap_layout"):
+            self._refresh_spike_group_cmap_controls()
 
     def _store_current_window_controls(self, tab_index: int | None = None) -> None:
         target = self.left_tabs.currentIndex() if tab_index is None else tab_index
         start = self._window_start_seconds()
         duration = self._window_duration_seconds()
-        if target == 1:
+        if self._is_sleep_tab_index(target):
             self.sleep_window_start_seconds = start
             self.sleep_window_duration_seconds = duration
         else:
@@ -919,7 +1350,7 @@ class MainWindow(QMainWindow):
         self._refresh_sleep_plot_window()
 
     def _is_sleep_scoring_active(self) -> bool:
-        return hasattr(self, "left_tabs") and self.left_tabs.currentIndex() == 1
+        return hasattr(self, "left_tabs") and self._is_sleep_tab_index(self.left_tabs.currentIndex())
 
     def _refresh_sleep_plot_window(self) -> None:
         if self.sleep_state_data is None:
@@ -1145,6 +1576,7 @@ class MainWindow(QMainWindow):
             self.visible_groups.add(group_index)
             now_visible = True
         self._refresh_viewer_layout()
+        self._refresh_spike_overlay()
         self.statusBar().showMessage(f"Group {group_index + 1} {'shown' if now_visible else 'hidden'}", 2500)
 
     def _toggle_bad_channel(self, channel: int) -> None:
@@ -1250,6 +1682,10 @@ class MainWindow(QMainWindow):
         self.scale.setValue(self._default_scale())
         self._refresh_viewer_layout()
 
+    def _signal_background_changed(self) -> None:
+        self._refresh_event_overlay()
+        self._refresh_viewer_layout()
+
     def _default_scale(self) -> float:
         if self.view_mode.currentText() == "group_columns":
             return 0.8 if self.bandpass_enabled.isChecked() else 1.0
@@ -1290,6 +1726,7 @@ class MainWindow(QMainWindow):
             layout_groups = self._visible_groups()
             layout = single_column_layout(layout_groups, self.bad_channels, self.channel_colors)
         self.viewer.set_viewport_height(self.signal_scroll.viewport().height())
+        self.viewer.set_background_mode(self.signal_background.currentText() if hasattr(self, "signal_background") else "black")
         self.viewer.set_traces(
             time,
             data,
@@ -1476,6 +1913,9 @@ class MainWindow(QMainWindow):
 
     def _handle_navigation_key(self, event) -> bool:
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            if event.key() == Qt.Key.Key_S:
+                self._save_signal_screenshot()
+                return True
             if event.key() == Qt.Key.Key_U:
                 self.streaming_mode.setChecked(not self.streaming_mode.isChecked())
                 return True
@@ -1490,6 +1930,13 @@ class MainWindow(QMainWindow):
                 return True
             if event.key() == Qt.Key.Key_BracketLeft:
                 self.spacing.setValue(max(self.spacing.minimum(), self.spacing.value() / 1.15))
+                return True
+        if self._is_events_active() and self.event_id_text.text().strip():
+            if event.key() == Qt.Key.Key_Right:
+                self._step_event_id(1)
+                return True
+            if event.key() == Qt.Key.Key_Left:
+                self._step_event_id(-1)
                 return True
         if event.key() == Qt.Key.Key_Right:
             self._scroll_time(self._window_duration_seconds() * 0.25)
@@ -1536,6 +1983,58 @@ class MainWindow(QMainWindow):
     def _scroll_traces(self, delta_pixels: int) -> None:
         bar = self.signal_scroll.verticalScrollBar()
         bar.setValue(bar.value() + delta_pixels)
+
+    def _save_signal_screenshot(self) -> None:
+        if self._is_sleep_scoring_active():
+            QMessageBox.information(self, "Screenshot", "Switch to Recording, Spikes, or Events to save the signal view.")
+            return
+        viewport = self.signal_scroll.viewport()
+        if viewport.width() <= 0 or viewport.height() <= 0:
+            QMessageBox.critical(self, "Screenshot", "Signal view is not ready to save.")
+            return
+        default_path = self._default_screenshot_path()
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Save signal screenshot",
+            str(default_path),
+            "PNG image (*.png)",
+        )
+        if not path:
+            return
+        save_path = self._screenshot_path_with_suffix(Path(path), selected_filter)
+        try:
+            self._save_signal_viewport_png(save_path)
+        except OSError as exc:
+            QMessageBox.critical(self, "Screenshot Error", str(exc))
+            return
+        self.statusBar().showMessage(f"Saved screenshot: {save_path.name}", 5000)
+
+    def _save_signal_viewport_png(self, path: Path) -> None:
+        pixmap = self.signal_scroll.viewport().grab()
+        if not pixmap.save(str(path), "PNG"):
+            raise OSError(f"Could not save PNG screenshot: {path}")
+
+    def _default_screenshot_path(self) -> Path:
+        start = self._duration_slug(self._window_start_seconds())
+        duration = self._duration_slug(self._window_duration_seconds())
+        filename = f"screenshot_from-{start}_duration-{duration}.png"
+        recording_path = self.dat_path.text().strip()
+        if recording_path:
+            path = Path(recording_path)
+            return (path if path.is_dir() else path.parent) / filename
+        return Path.cwd() / filename
+
+    def _screenshot_path_with_suffix(self, path: Path, selected_filter: str) -> Path:
+        suffix = path.suffix.lower()
+        if suffix == ".png":
+            return path
+        return path.with_suffix(".png")
+
+    def _duration_slug(self, seconds: float) -> str:
+        total_msec = max(0, int(round(float(seconds) * 1000.0)))
+        minutes, rem = divmod(total_msec, 60000)
+        secs, msec = divmod(rem, 1000)
+        return f"{minutes}min-{secs}sec-{msec}ms"
 
     def _spacing_changed(self) -> None:
         self.row_spacing = self.spacing.value()
@@ -1646,6 +2145,7 @@ class MainWindow(QMainWindow):
                     "Left / Right: scroll time by one window",
                     "Up / Down: scroll traces vertically",
                     "Ctrl+U: toggle streaming mode",
+                    "Ctrl+S: save signal screenshot as PNG",
                     "Ctrl+End: jump to latest complete window",
                     "Ctrl+I / Ctrl+D: increase / decrease trace scale",
                     "Ctrl+Mouse wheel on traces: zoom time window",

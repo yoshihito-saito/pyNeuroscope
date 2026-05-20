@@ -1,6 +1,7 @@
 import pytest
 
 from pyneuroscope.color_map import (
+    COLOR_MAP_NAMES,
     ColorMapError,
     apply_channel_overrides,
     color_by_channel_index,
@@ -35,6 +36,11 @@ def test_palette_from_name_interpolates_common_color_maps() -> None:
     assert palette_from_name("cool", 2) == ["#00ffff", "#ff00ff"]
     assert palette_from_name("hot", 2) == ["#0b0000", "#ffffff"]
     assert palette_from_name("plasma", 2) == ["#0d0887", "#f0f921"]
+
+
+def test_color_map_names_keep_single_rainbow_variant() -> None:
+    assert "rainbow" in COLOR_MAP_NAMES
+    assert "camp rainbow" not in COLOR_MAP_NAMES
 
 
 def test_color_by_group_preserves_group_assignment() -> None:

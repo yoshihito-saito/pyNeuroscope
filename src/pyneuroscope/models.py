@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
+
 
 @dataclass(frozen=True)
 class RecordingMetadata:
@@ -95,3 +97,48 @@ class ValidationResult:
     @property
     def warnings(self) -> list[str]:
         return [message.message for message in self.messages if message.level == "warning"]
+
+
+@dataclass(frozen=True)
+class SpikeUnit:
+    uid: int
+    label: str
+    times: np.ndarray
+    channel: int | None = None
+    group: int | None = None
+    region: str | None = None
+
+
+@dataclass(frozen=True)
+class SpikesData:
+    path: Path
+    basename: str
+    units: list[SpikeUnit] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class EventSeries:
+    name: str
+    path: Path
+    timestamps: np.ndarray
+    peaks: np.ndarray | None = None
+
+
+@dataclass(frozen=True)
+class SignalSpikeOverlay:
+    unit_id: int
+    label: str
+    times: np.ndarray
+    color: str
+    channel: int | None = None
+
+
+@dataclass(frozen=True)
+class SignalEventOverlay:
+    name: str
+    color: str
+    timestamps: np.ndarray
+    peaks: np.ndarray | None = None
+    show_intervals: bool = True
+    show_peaks: bool = False
+    below: bool = False
