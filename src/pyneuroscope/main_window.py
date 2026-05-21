@@ -564,13 +564,19 @@ class MainWindow(QMainWindow):
 
     def _resolve_recording_dat_paths(self, selected_path: Path) -> list[Path]:
         if selected_path.is_file():
-            if selected_path.name.lower() != "amplifier.dat":
-                raise DatReaderError(f"Expected amplifier.dat, got: {selected_path.name}")
+            if selected_path.suffix.lower() != ".dat":
+                raise DatReaderError(f"Expected a .dat file, got: {selected_path.name}")
             return [selected_path]
         if not selected_path.exists():
             raise DatReaderError(f"Path does not exist: {selected_path}")
         if not selected_path.is_dir():
             raise DatReaderError(f"Unsupported path: {selected_path}")
+        open_ephys_matches = self._find_open_ephys_continuous_dat_paths(selected_path)
+        if open_ephys_matches:
+            return open_ephys_matches
+        direct_basename_dat = selected_path / f"{selected_path.name}.dat"
+        if direct_basename_dat.exists():
+            return [direct_basename_dat]
         direct_dat = selected_path / "amplifier.dat"
         if direct_dat.exists():
             return [direct_dat]
@@ -580,15 +586,57 @@ class MainWindow(QMainWindow):
             raise DatReaderError(f"Could not inspect folder: {selected_path}") from exc
         matches = sorted(
             (
-                child / "amplifier.dat"
+                candidate
                 for child in children
-                if child.is_dir() and (child / "amplifier.dat").is_file()
+                if child.is_dir()
+                for candidate in [child / "amplifier.dat", child / f"{child.name}.dat"]
+                if candidate.is_file()
             ),
             key=self._recording_session_sort_key,
         )
         if not matches:
-            raise DatReaderError(f"No amplifier.dat found directly under: {selected_path}")
+            raise DatReaderError(f"No amplifier.dat, basename.dat, or continuous.dat found under: {selected_path}")
         return matches
+
+    def _find_open_ephys_continuous_dat_paths(self, selected_path: Path) -> list[Path]:
+        matches: list[Path] = []
+        stack: list[tuple[Path, int]] = [(selected_path, 0)]
+        skip_names = {
+            ".git",
+            "__pycache__",
+            "analysis",
+            "kilosort",
+            "kilosort2",
+            "kilosort3",
+            "phy",
+            "original_dat",
+        }
+        while stack:
+            folder, depth = stack.pop()
+            candidate = folder / "continuous.dat"
+            if candidate.is_file():
+                matches.append(candidate)
+                continue
+            if depth >= 8:
+                continue
+            try:
+                children = sorted(folder.iterdir(), key=lambda path: path.name.lower())
+            except OSError:
+                continue
+            for child in reversed(children):
+                if not child.is_dir():
+                    continue
+                if child.name.lower() in skip_names:
+                    continue
+                stack.append((child, depth + 1))
+        unique: list[Path] = []
+        seen: set[str] = set()
+        for path in sorted(matches, key=self._recording_session_sort_key):
+            key = str(path.resolve()) if path.exists() else str(path)
+            if key not in seen:
+                seen.add(key)
+                unique.append(path)
+        return unique
 
     def _recording_session_sort_key(self, path: Path) -> tuple:
         timestamp = self._extract_recording_folder_timestamp(path)
@@ -741,6 +789,8 @@ class MainWindow(QMainWindow):
             return
         try:
             self._recording_dat_paths = self._resolve_recording_dat_paths(Path(path))
+            primary_dat_path = self._recording_dat_paths[0]
+            self._load_adjacent_xml_if_present(primary_dat_path)
             total_duration = sum(info.duration_seconds for info in self._recording_dat_infos())
         except DatReaderError as exc:
             QMessageBox.critical(self, "Recording Path Error", str(exc))
@@ -753,8 +803,6 @@ class MainWindow(QMainWindow):
         )
         if not self._is_sleep_scoring_active():
             self._apply_window_controls_to_widgets(self.record_window_start_seconds, self.record_window_duration_seconds)
-        primary_dat_path = self._recording_dat_paths[0]
-        self._load_adjacent_xml_if_present(primary_dat_path)
         self._load_adjacent_anatomical_map_if_present(primary_dat_path)
         self._load_adjacent_spikes_and_events()
         if self._is_sleep_scoring_active():
@@ -858,9 +906,27 @@ class MainWindow(QMainWindow):
             self._apply_xml_metadata(Path(path))
 
     def _load_adjacent_xml_if_present(self, dat_path: Path) -> None:
-        xml_path = dat_path.with_suffix(".xml")
+        xml_path = self._resolve_adjacent_xml_path(dat_path)
+        if xml_path is None:
+            return
         if xml_path.exists():
             self._apply_xml_metadata(xml_path, show_status=True)
+
+    def _resolve_adjacent_xml_path(self, dat_path: Path) -> Path | None:
+        candidates: list[Path] = []
+        selected_text = self.dat_path.text().strip()
+        if selected_text:
+            selected_path = Path(selected_text)
+            if selected_path.is_dir():
+                candidates.append(selected_path / f"{selected_path.name}.xml")
+                candidates.append(selected_path / "amplifier.xml")
+            else:
+                candidates.append(selected_path.with_suffix(".xml"))
+        candidates.append(dat_path.with_suffix(".xml"))
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return None
 
     def _apply_xml_metadata(self, path: Path, *, show_status: bool = False) -> None:
         try:

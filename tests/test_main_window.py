@@ -110,29 +110,26 @@ def test_color_modes_use_group_order_and_group_local_palettes() -> None:
     assert window.channel_colors[0] == "#808080"
 
 
-def test_recording_discovery_rejects_explicit_basename_dat(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_recording_discovery_accepts_explicit_dat_file(monkeypatch: pytest.MonkeyPatch) -> None:
     app = QApplication.instance() or QApplication([])
     _ = app
     window = MainWindow()
     selected = Path("session") / "basename.dat"
     monkeypatch.setattr(Path, "is_file", lambda self: self == selected)
 
-    with pytest.raises(DatReaderError, match="Expected amplifier.dat"):
-        window._resolve_recording_dat_paths(selected)
+    assert window._resolve_recording_dat_paths(selected) == [selected]
 
 
-def test_recording_discovery_ignores_basename_dat_in_folder(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_recording_discovery_uses_direct_basename_dat(tmp_path: Path) -> None:
     app = QApplication.instance() or QApplication([])
     _ = app
     window = MainWindow()
-    selected = Path("session")
-    monkeypatch.setattr(Path, "is_file", lambda self: False)
-    monkeypatch.setattr(Path, "exists", lambda self: self == selected)
-    monkeypatch.setattr(Path, "is_dir", lambda self: self == selected)
-    monkeypatch.setattr(Path, "iterdir", lambda self: [self / "basename.dat"])
+    selected = tmp_path / "session"
+    selected.mkdir()
+    basename_dat = selected / "session.dat"
+    basename_dat.write_bytes(b"\0" * 16)
 
-    with pytest.raises(DatReaderError, match="No amplifier.dat"):
-        window._resolve_recording_dat_paths(selected)
+    assert window._resolve_recording_dat_paths(selected) == [basename_dat]
 
 
 def test_recording_discovery_checks_only_one_folder_level(tmp_path: Path) -> None:
@@ -153,6 +150,66 @@ def test_recording_discovery_checks_only_one_folder_level(tmp_path: Path) -> Non
     nested_dat.write_bytes(b"\0" * 16)
 
     assert window._resolve_recording_dat_paths(tmp_path) == [first_dat, second_dat]
+
+
+def test_recording_discovery_prefers_open_ephys_continuous_dat_over_basename_dat(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    window = MainWindow()
+    basename_dat = tmp_path / f"{tmp_path.name}.dat"
+    basename_dat.write_bytes(b"\0" * 16)
+    first = tmp_path / "2026-05-20_12-00-00" / "Record Node 101" / "experiment1" / "recording1" / "continuous" / "Acquisition_Board-102.acquisition_board"
+    second = tmp_path / "2026-05-20_12-30-00" / "Record Node 101" / "experiment1" / "recording1" / "continuous" / "Acquisition_Board-102.acquisition_board"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    first_dat = first / "continuous.dat"
+    second_dat = second / "continuous.dat"
+    first_dat.write_bytes(b"\0" * 16)
+    second_dat.write_bytes(b"\0" * 16)
+
+    assert window._resolve_recording_dat_paths(tmp_path) == [first_dat, second_dat]
+
+
+def test_adjacent_xml_prefers_selected_folder_basename_xml_for_open_ephys(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    window = MainWindow()
+    selected = tmp_path / "day17"
+    dat_folder = selected / "2026-05-20_12-32-59" / "Record Node 101" / "experiment1" / "recording1" / "continuous" / "Acquisition_Board-102.acquisition_board"
+    dat_folder.mkdir(parents=True)
+    dat_path = dat_folder / "continuous.dat"
+    dat_path.write_bytes(b"\0" * 16)
+    base_xml = selected / "day17.xml"
+    continuous_xml = dat_folder / "continuous.xml"
+    base_xml.write_text("<parameters />", encoding="utf-8")
+    continuous_xml.write_text("<parameters />", encoding="utf-8")
+    window.dat_path.blockSignals(True)
+    window.dat_path.setText(str(selected))
+    window.dat_path.blockSignals(False)
+
+    assert window._resolve_adjacent_xml_path(dat_path) == base_xml
+
+
+def test_dat_path_commit_loads_xml_before_inspecting_dat(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    window = MainWindow()
+    dat_path = tmp_path / "continuous.dat"
+    dat_path.write_bytes(b"\0" * 16)
+    calls: list[str] = []
+    window.dat_path.blockSignals(True)
+    window.dat_path.setText(str(tmp_path))
+    window.dat_path.blockSignals(False)
+    monkeypatch.setattr(window, "_resolve_recording_dat_paths", lambda path: [dat_path])
+    monkeypatch.setattr(window, "_load_adjacent_xml_if_present", lambda path: calls.append("xml"))
+    monkeypatch.setattr(window, "_recording_dat_infos", lambda: calls.append("inspect") or [SimpleNamespace(duration_seconds=1.0)])
+    monkeypatch.setattr(window, "_load_adjacent_anatomical_map_if_present", lambda path: None)
+    monkeypatch.setattr(window, "_load_adjacent_spikes_and_events", lambda: None)
+    monkeypatch.setattr(window, "_load_window", lambda silent=True: None)
+
+    window._dat_path_committed()
+
+    assert calls[:2] == ["xml", "inspect"]
 
 
 def test_parent_anatomical_map_is_auto_resolved(tmp_path: Path) -> None:
