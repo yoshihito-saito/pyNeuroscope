@@ -534,6 +534,13 @@ class SignalViewer(QWidget):
             lane_top = top + event_index * lane_height if below else top
             lane_bottom = min(bottom, lane_top + lane_height)
             color = QColor(event.color)
+            if below and label_events:
+                painter.setPen(QPen(self._color("label")))
+                painter.drawText(
+                    QRect(0, int(lane_top), max(1, int(margin_left - 6)), max(1, int(lane_bottom - lane_top))),
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                    event.name,
+                )
             painter.save()
             painter.setClipRect(
                 QRect(
@@ -573,13 +580,6 @@ class SignalViewer(QWidget):
                         x = margin_left + column * column_width + label_gutter + fraction * trace_width
                         painter.drawLine(QPointF(x, lane_top), QPointF(x, lane_bottom))
             painter.restore()
-            if below and label_events:
-                painter.setPen(QPen(self._color("label")))
-                painter.drawText(
-                    QRect(0, int(lane_top), max(1, int(margin_left - 6)), max(1, int(lane_bottom - lane_top))),
-                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
-                    event.name,
-                )
 
     def _draw_epoch_boundaries(
         self,

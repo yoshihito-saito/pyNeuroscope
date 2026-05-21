@@ -69,6 +69,7 @@ class MainWindow(QMainWindow):
         self.visible_groups: set[int] = set()
         self.channel_colors: dict[int, str] = {}
         self.channel_regions: dict[int, str] = {}
+        self.region_cmap_controls: dict[str, QComboBox] = {}
         self.loaded_metadata = RecordingMetadata()
         self._recording_dat_paths: list[Path] = []
         self._recording_epoch_segments: list[tuple[str, float, float]] = []
@@ -291,9 +292,6 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setSpacing(8)
-        info = QLabel("Loads basename.spikes.cellinfo.mat and displays units as trace-aligned ticks or a compact raster.")
-        info.setWordWrap(True)
-        info.setStyleSheet("color: #b8c7da;")
         self.spikes_status = QLabel("Spikes: not loaded")
         self.spikes_status.setWordWrap(True)
         self.show_spikes = QCheckBox("Show spikes")
@@ -313,7 +311,6 @@ class MainWindow(QMainWindow):
         self.spike_group_cmap_panel = QWidget()
         self.spike_group_cmap_layout = QFormLayout(self.spike_group_cmap_panel)
 
-        layout.addWidget(info)
         layout.addWidget(self.spikes_status)
         layout.addWidget(self.show_spikes)
         layout.addWidget(self.spikes_below)
@@ -330,9 +327,6 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setSpacing(8)
-        info = QLabel("Loads basename.*.events.mat. Intervals shade timestamp start-end; peaks draw timing lines.")
-        info.setWordWrap(True)
-        info.setStyleSheet("color: #b8c7da;")
         self.events_status = QLabel("Events: not loaded")
         self.events_status.setWordWrap(True)
         self.events_list = QWidget()
@@ -354,7 +348,6 @@ class MainWindow(QMainWindow):
         jump_row.addWidget(self.event_id_text, 1)
         jump_row.addWidget(next_event)
 
-        layout.addWidget(info)
         layout.addWidget(self.events_status)
         layout.addWidget(self.events_list)
         layout.addWidget(QLabel("Jump to event"))
@@ -538,9 +531,9 @@ class MainWindow(QMainWindow):
         self.color_map.setCurrentText("summer")
         self.color_map.currentTextChanged.connect(self._reset_colors)
         self.color_mode = QComboBox()
-        self.color_mode.addItems(["all", "group"])
+        self.color_mode.addItems(["all", "group", "per region"])
         self.color_mode.setCurrentText("all")
-        self.color_mode.currentTextChanged.connect(self._reset_colors)
+        self.color_mode.currentTextChanged.connect(self._color_mode_changed)
         color_row = QHBoxLayout()
         color_row.setContentsMargins(0, 0, 0, 0)
         color_row.addWidget(QLabel("Color map"))
@@ -549,9 +542,13 @@ class MainWindow(QMainWindow):
         color_mode_row.setContentsMargins(0, 0, 0, 0)
         color_mode_row.addWidget(QLabel("Color mode"))
         color_mode_row.addWidget(self.color_mode, 1)
+        self.region_cmap_panel = QWidget()
+        self.region_cmap_layout = QFormLayout(self.region_cmap_panel)
+        self.region_cmap_panel.setVisible(False)
         layout.addWidget(self.probe_viewer, 1)
         layout.addLayout(color_row)
         layout.addLayout(color_mode_row)
+        layout.addWidget(self.region_cmap_panel)
         return panel
 
     def _browse_dat(self) -> None:
@@ -1200,6 +1197,7 @@ class MainWindow(QMainWindow):
             return
         overlays: list[SignalSpikeOverlay] = []
         if self.spikes_data is not None:
+            unit_colors: dict[int, str] = {}
             groups: dict[str, list] = {}
             for unit in self.spikes_data.units:
                 if not self._spike_unit_is_visible(unit):
@@ -1210,15 +1208,19 @@ class MainWindow(QMainWindow):
                 cmap_name = cmap.currentText() if cmap is not None else self.spikes_cmap.currentText()
                 colors = palette_from_name(cmap_name, max(1, len(units)))
                 for index, unit in enumerate(units):
-                    overlays.append(
-                        SignalSpikeOverlay(
-                            unit_id=unit.uid,
-                            label=unit.label,
-                            times=unit.times,
-                            color=colors[index % len(colors)],
-                            channel=unit.channel,
-                        )
+                    unit_colors[unit.uid] = colors[index % len(colors)]
+            for unit in self._ordered_spike_units_for_display():
+                if not self._spike_unit_is_visible(unit):
+                    continue
+                overlays.append(
+                    SignalSpikeOverlay(
+                        unit_id=unit.uid,
+                        label=unit.label,
+                        times=unit.times,
+                        color=unit_colors.get(unit.uid, "#808080"),
+                        channel=unit.channel,
                     )
+                )
         self.viewer.set_spike_overlays(
             overlays,
             show=self.show_spikes.isChecked() if hasattr(self, "show_spikes") else False,
@@ -1229,6 +1231,24 @@ class MainWindow(QMainWindow):
                 else False
             ),
         )
+
+    def _ordered_spike_units_for_display(self) -> list:
+        if self.spikes_data is None:
+            return []
+        original_index = {id(unit): index for index, unit in enumerate(self.spikes_data.units)}
+
+        def sort_key(unit) -> tuple[int, int, int]:
+            group_index = self._probe_group_for_channel(unit.channel)
+            if group_index is None:
+                return (10**9, unit.channel if unit.channel is not None else 10**9, original_index[id(unit)])
+            group = self.groups[group_index]
+            try:
+                channel_order = group.channels.index(unit.channel)
+            except ValueError:
+                channel_order = 10**9
+            return (group_index, channel_order, original_index[id(unit)])
+
+        return sorted(self.spikes_data.units, key=sort_key)
 
     def _refresh_event_overlay(self) -> None:
         if not hasattr(self, "viewer"):
@@ -1301,11 +1321,15 @@ class MainWindow(QMainWindow):
             self.region_summary.setText("No regions assigned")
             if hasattr(self, "spike_group_cmap_layout"):
                 self._refresh_spike_group_cmap_controls()
+            if hasattr(self, "region_cmap_layout"):
+                self._refresh_region_cmap_controls()
             return
         summary = ", ".join(f"{name}: {count}" for name, count in sorted(counts.items()))
         self.region_summary.setText(f"Assigned channels: {summary}")
         if hasattr(self, "spike_group_cmap_layout"):
             self._refresh_spike_group_cmap_controls()
+        if hasattr(self, "region_cmap_layout"):
+            self._refresh_region_cmap_controls()
 
     def _store_current_window_controls(self, tab_index: int | None = None) -> None:
         target = self.left_tabs.currentIndex() if tab_index is None else tab_index
@@ -1525,13 +1549,16 @@ class MainWindow(QMainWindow):
 
     def _reset_colors(self) -> None:
         try:
-            if self.color_mode.currentText() == "all":
+            color_mode = self.color_mode.currentText()
+            if color_mode == "all":
                 group_channel_count = sum(len(group.channels) for group in self.groups)
                 self.channel_colors = color_by_group_sequence(
                     self.n_channels.value(),
                     self.groups,
                     self._color_palette(max(1, group_channel_count)),
                 )
+            elif color_mode == "per region":
+                self.channel_colors = self._color_by_region_cmap()
             else:
                 self.channel_colors = self._color_by_group_local_cmap()
         except ColorMapError:
@@ -1541,6 +1568,67 @@ class MainWindow(QMainWindow):
                 self._color_palette(self.n_channels.value()),
             )
         self._refresh_viewer_layout()
+
+    def _color_mode_changed(self) -> None:
+        self._refresh_region_cmap_controls()
+        self._reset_colors()
+
+    def _refresh_region_cmap_controls(self) -> None:
+        if not hasattr(self, "region_cmap_layout"):
+            return
+        while self.region_cmap_layout.count():
+            item = self.region_cmap_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self.region_cmap_controls = {}
+        regions = self._ordered_channel_regions()
+        show_panel = self.color_mode.currentText() == "per region" and bool(regions)
+        self.region_cmap_panel.setVisible(show_panel)
+        if not show_panel:
+            return
+        header = QLabel("Region colormaps")
+        header.setStyleSheet("font-weight: 600;")
+        self.region_cmap_layout.addRow(header)
+        for region in regions:
+            combo = QComboBox()
+            combo.addItems(COLOR_MAP_NAMES)
+            combo.setCurrentText(self.color_map.currentText())
+            combo.currentTextChanged.connect(self._reset_colors)
+            self.region_cmap_layout.addRow(region, combo)
+            self.region_cmap_controls[region] = combo
+
+    def _color_by_region_cmap(self) -> dict[int, str]:
+        colors = {channel: "#808080" for channel in range(self.n_channels.value())}
+        regions = self._ordered_channel_regions()
+        if not regions:
+            return colors
+        for region in regions:
+            channels = self._channels_for_region(region)
+            cmap = self.region_cmap_controls.get(region) if hasattr(self, "region_cmap_controls") else None
+            cmap_name = cmap.currentText() if cmap is not None else self.color_map.currentText()
+            region_colors = palette_from_name(cmap_name, max(1, len(channels)))
+            for index, channel in enumerate(channels):
+                if 0 <= channel < self.n_channels.value():
+                    colors[channel] = region_colors[index % len(region_colors)]
+        return colors
+
+    def _channels_for_region(self, region: str) -> list[int]:
+        channels: list[int] = []
+        for group in self.groups:
+            for channel in group.channels:
+                if self.channel_regions.get(channel, "").strip() == region:
+                    channels.append(channel)
+        return channels
+
+    def _ordered_channel_regions(self) -> list[str]:
+        regions: list[str] = []
+        for group in self.groups:
+            for channel in group.channels:
+                region = self.channel_regions.get(channel, "").strip()
+                if region and region not in regions:
+                    regions.append(region)
+        return regions
 
     def _color_by_group_local_cmap(self) -> dict[int, str]:
         colors = {channel: "#808080" for channel in range(self.n_channels.value())}

@@ -98,6 +98,17 @@ def test_color_modes_use_group_order_and_group_local_palettes() -> None:
     assert window.channel_colors[1] == "#ffff00"
     assert window.channel_colors[3] == "#808080"
 
+    window.channel_regions = {4: "CA1", 2: "PFC", 5: "CA1", 1: "CA1"}
+    window.color_mode.setCurrentText("per region")
+    window.region_cmap_controls["CA1"].setCurrentText("spring")
+    window.region_cmap_controls["PFC"].setCurrentText("winter")
+    window._reset_colors()
+    assert window.channel_colors[4] == "#ff00ff"
+    assert window.channel_colors[5] == "#ff8080"
+    assert window.channel_colors[1] == "#ffff00"
+    assert window.channel_colors[2] == "#0000ff"
+    assert window.channel_colors[0] == "#808080"
+
 
 def test_recording_discovery_rejects_explicit_basename_dat(monkeypatch: pytest.MonkeyPatch) -> None:
     app = QApplication.instance() or QApplication([])
@@ -204,6 +215,29 @@ def test_hidden_probe_group_hides_detected_spikes() -> None:
     window._refresh_spike_overlay()
 
     assert [unit.unit_id for unit in window.viewer._spike_overlays] == [1]
+
+
+def test_spike_per_region_keeps_probe_group_display_order() -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    window = MainWindow()
+    window.groups = [ChannelGroup("PFC", [10]), ChannelGroup("CA1", [1])]
+    window.visible_groups = {0, 1}
+    window.channel_regions = {10: "PFC", 1: "CA1"}
+    window.spikes_data = SpikesData(
+        path=Path("spikes.mat"),
+        basename="test",
+        units=[
+            SpikeUnit(1, "ca1", np.asarray([0.1]), channel=1),
+            SpikeUnit(2, "pfc", np.asarray([0.2]), channel=10),
+        ],
+    )
+    window.show_spikes.setChecked(True)
+    window.spikes_per_region.setChecked(True)
+
+    window._refresh_spike_overlay()
+
+    assert [unit.unit_id for unit in window.viewer._spike_overlays] == [2, 1]
 
 
 def test_shift_wheel_changes_row_spacing() -> None:
