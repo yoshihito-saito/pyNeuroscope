@@ -437,7 +437,7 @@ class SignalViewer(QWidget):
             return
         painter.setPen(QPen(self._color("muted")))
         painter.drawText(
-            QRect(0, int(top), max(1, int(margin_left - 6)), max(1, int(bottom - top))),
+            QRect(0, int(top), max(1, int(margin_left)), max(1, int(bottom - top))),
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
             "spikes",
         )
@@ -474,6 +474,7 @@ class SignalViewer(QWidget):
                     x = lane_left + fraction * trace_width
                     half_height = self._compressed_raster_tick_half_height(row_height)
                     painter.drawLine(QPointF(x, y - half_height), QPointF(x, y + half_height))
+        painter.restore()
 
     def _spike_raster_global_row_height(
         self,
@@ -494,7 +495,6 @@ class SignalViewer(QWidget):
         if row_height < 2.5:
             return 0.45
         return row_height * 0.38
-        painter.restore()
 
     def _spike_units_by_column(self, columns: int) -> dict[int, list[SignalSpikeOverlay]]:
         if columns <= 1:
@@ -537,7 +537,7 @@ class SignalViewer(QWidget):
             if below and label_events:
                 painter.setPen(QPen(self._color("label")))
                 painter.drawText(
-                    QRect(0, int(lane_top), max(1, int(margin_left - 6)), max(1, int(lane_bottom - lane_top))),
+                    QRect(0, int(lane_top), max(1, int(margin_left)), max(1, int(lane_bottom - lane_top))),
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                     event.name,
                 )
