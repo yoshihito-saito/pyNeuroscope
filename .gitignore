@@ -5,6 +5,7 @@ __pycache__/
 IMPLEMENTATION.md
 demo/
 dev_data/
+paperflow/
 
 # Python build/test artifacts
 .pytest_cache/

@@ -34,13 +34,37 @@ def test_palette_from_name_interpolates_common_color_maps() -> None:
     assert winter[0] == "#0000ff"
     assert winter[-1] == "#00ff80"
     assert palette_from_name("cool", 2) == ["#00ffff", "#ff00ff"]
-    assert palette_from_name("hot", 2) == ["#0b0000", "#ffffff"]
+    assert palette_from_name("inferno", 2) == ["#000004", "#fcffa4"]
+    assert palette_from_name("magma", 2) == ["#000004", "#fcfdbf"]
     assert palette_from_name("plasma", 2) == ["#0d0887", "#f0f921"]
+    assert palette_from_name("Wistia", 2) == ["#e4ff7a", "#fc4e00"]
+    assert palette_from_name("rainbow", 2) == ["#2d5bff", "#b032ff"]
+    assert palette_from_name("Greys", 2) == ["#bdbdbd", "#252525"]
+    assert palette_from_name("Blues", 2) == ["#9ecae1", "#08519c"]
 
 
-def test_color_map_names_keep_single_rainbow_variant() -> None:
-    assert "rainbow" in COLOR_MAP_NAMES
-    assert "camp rainbow" not in COLOR_MAP_NAMES
+def test_color_map_names_match_recording_window_order() -> None:
+    assert COLOR_MAP_NAMES == [
+        "black",
+        "white",
+        "Greys",
+        "Purples",
+        "Blues",
+        "Greens",
+        "Oranges",
+        "Reds",
+        "viridis",
+        "plasma",
+        "inferno",
+        "magma",
+        "spring",
+        "summer",
+        "autumn",
+        "winter",
+        "cool",
+        "Wistia",
+        "rainbow",
+    ]
 
 
 def test_color_by_group_preserves_group_assignment() -> None:

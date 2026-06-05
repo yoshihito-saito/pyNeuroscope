@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from importlib.resources import files
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer
@@ -35,6 +37,7 @@ from scipy.io import loadmat, savemat
 
 from .anatomical_map import AnatomicalMapError, build_anatomical_map_csv, load_anatomical_map_csv
 from .brain_region_editor import BrainRegionEditorDialog
+from .channel_profile_viewer import ChannelProfileViewer, channel_rms
 from .color_map import (
     COLOR_MAP_NAMES,
     ColorMapError,
@@ -43,6 +46,7 @@ from .color_map import (
     palette_from_name,
 )
 from .channel_map_editor import ChannelMapDialog, GroupDesign, group_designs_from_groups
+from .csd import CSD_COLORMAPS
 from .dat_reader import DatReaderError, inspect_dat, read_dat_window
 from .event_io import EventLoadError, candidate_analysis_dirs, find_event_files, find_spikes_file, load_event_file, load_spikes_cellinfo
 from .models import ChannelGroup, EventSeries, RecordingMetadata, SignalEventOverlay, SignalSpikeOverlay, SpikesData
@@ -53,24 +57,35 @@ from .sleep_state_edit import append_theta_epochs, idx_to_intervals, states_to_e
 from .sleep_state_viewer import SPECTROGRAM_COLORMAPS, SleepStateViewer
 from .signal_viewer import SignalViewer
 from .signal_filters import SignalFilterError, bandpass_filter, common_average_reference
+from .spectrogram_viewer import ChannelSpectrogramDialog
 from .validation import validate_settings
 from .xml_builder import XmlError, build_neurocode_xml, parse_neurosuite_xml
 
 
+@dataclass
+class ProbeConfig:
+    n_channels: int
+    xml_path: Path | None = None
+    groups: list[ChannelGroup] | None = None
+    bad_channels: set[int] = field(default_factory=set)
+
+
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, initial_path: str | Path | None = None) -> None:
         super().__init__()
         self.setWindowTitle("pyNeuroscope")
         self.setWindowIcon(QIcon(str(files("pyneuroscope.resources").joinpath("logo.ico"))))
         self.resize(1280, 820)
         self.groups: list[ChannelGroup] = []
         self.group_designs: list[GroupDesign] = []
+        self.probes: list[ProbeConfig] = [ProbeConfig(4)]
         self.bad_channels: set[int] = set()
         self.visible_groups: set[int] = set()
         self.channel_colors: dict[int, str] = {}
         self.channel_regions: dict[int, str] = {}
         self.region_cmap_controls: dict[str, QComboBox] = {}
         self.loaded_metadata = RecordingMetadata()
+        self._group_source = "default"
         self._recording_dat_paths: list[Path] = []
         self._recording_epoch_segments: list[tuple[str, float, float]] = []
         self._recording_epoch_boundaries = np.asarray([], dtype=float)
@@ -91,11 +106,18 @@ class MainWindow(QMainWindow):
         self.sleep_pending_edit: tuple[float, float, int] | None = None
         self.spikes_data: SpikesData | None = None
         self.event_series: list[EventSeries] = []
-        self.event_controls: dict[str, dict[str, QCheckBox]] = {}
+        self.event_controls: dict[str, dict[str, QWidget]] = {}
+        self.event_display_names: dict[str, str] = {}
+        self._selected_event_key: str | None = None
+        self._event_navigation_anchor: tuple[str, int] | None = None
+        self._setting_event_navigation_window = False
         self.spike_group_cmaps: dict[str, QComboBox] = {}
         self._build_ui()
         QApplication.instance().installEventFilter(self)
         self._generate_groups()
+        if initial_path is not None:
+            self.dat_path.setText(str(initial_path))
+            QTimer.singleShot(0, self._dat_path_committed)
         self._refresh_all()
 
     def _build_ui(self) -> None:
@@ -123,10 +145,13 @@ class MainWindow(QMainWindow):
         self.dat_path = QLineEdit()
         self.dat_path.setMinimumWidth(260)
         self.dat_path.setMaximumWidth(720)
-        self.dat_path.setPlaceholderText("Select basepath or session folder")
-        browse = QPushButton("Browse")
-        browse.clicked.connect(self._browse_dat)
-        layout.addWidget(browse)
+        self.dat_path.setPlaceholderText("Select .dat file, basepath, or session folder")
+        browse_folder = QPushButton("Browse Folder")
+        browse_folder.clicked.connect(self._browse_dat)
+        open_dat = QPushButton("Open single DAT")
+        open_dat.clicked.connect(self._browse_dat_file)
+        layout.addWidget(browse_folder)
+        layout.addWidget(open_dat)
         layout.addWidget(QLabel("Recording path"))
         layout.addWidget(self.dat_path, 1)
         layout.addStretch(2)
@@ -145,10 +170,12 @@ class MainWindow(QMainWindow):
         self.recording_tab = self._build_recording_tab()
         self.spikes_tab = self._build_spikes_tab()
         self.events_tab = self._build_events_tab()
+        self.analysis_tab = self._build_analysis_tab()
         self.sleep_tab = self._build_sleep_scoring_tab()
         self.left_tabs.addTab(self.recording_tab, "Recording")
         self.left_tabs.addTab(self.spikes_tab, "Spikes")
         self.left_tabs.addTab(self.events_tab, "Events")
+        self.left_tabs.addTab(self.analysis_tab, "Analysis")
         self.left_tabs.addTab(self.sleep_tab, "State editor")
         self.left_tabs.currentChanged.connect(self._left_tab_changed)
         layout.addWidget(self.left_tabs, 1)
@@ -170,19 +197,24 @@ class MainWindow(QMainWindow):
         self.lfp_sampling_rate.setRange(1, 1000000)
         self.lfp_sampling_rate.setDecimals(3)
         self.lfp_sampling_rate.setValue(1250)
+        self.total_n_channels_label = QLabel("4")
         self.duration_label = QLabel("-")
         self.start_minutes = QSpinBox()
         self.start_minutes.setRange(0, 10**7)
         self.start_seconds = QSpinBox()
         self.start_seconds.setRange(0, 59)
-        self.start_msec = QSpinBox()
-        self.start_msec.setRange(0, 999)
+        self.start_msec = QDoubleSpinBox()
+        self.start_msec.setRange(0.0, 999.999)
+        self.start_msec.setDecimals(3)
+        self.start_msec.setSingleStep(0.1)
         self.duration_minutes = QSpinBox()
         self.duration_minutes.setRange(0, 10**7)
         self.duration_seconds = QSpinBox()
         self.duration_seconds.setRange(0, 59)
-        self.duration_msec = QSpinBox()
-        self.duration_msec.setRange(0, 999)
+        self.duration_msec = QDoubleSpinBox()
+        self.duration_msec.setRange(0.0, 999.999)
+        self.duration_msec.setDecimals(3)
+        self.duration_msec.setSingleStep(0.1)
         self.duration_seconds.setValue(1)
         self.bad_channels_text = QLineEdit()
         self.bad_channels_text.setPlaceholderText("e.g. 1, 12, 34")
@@ -204,7 +236,7 @@ class MainWindow(QMainWindow):
         self.car_mode = QComboBox()
         self.car_mode.addItems(["all", "per group"])
 
-        form.addRow("nChannels", self.n_channels)
+        form.addRow("Total nChannels", self.total_n_channels_label)
         form.addRow("samplingRate", self.sampling_rate)
         form.addRow("lfpSamplingRate", self.lfp_sampling_rate)
         form.addRow("Duration", self.duration_label)
@@ -216,6 +248,11 @@ class MainWindow(QMainWindow):
             self.lfp_sampling_rate,
         ]:
             widget.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+        self.n_channels.valueChanged.connect(self._n_channels_changed)
+        for widget in [
+            self.sampling_rate,
+            self.lfp_sampling_rate,
+        ]:
             widget.valueChanged.connect(self._refresh_all)
         for widget in [
             self.start_minutes,
@@ -241,29 +278,229 @@ class MainWindow(QMainWindow):
         self.bandpass_high.valueChanged.connect(self._reprocess_current_window)
         self.car_enabled.toggled.connect(self._reprocess_current_window)
         self.car_mode.currentTextChanged.connect(self._reprocess_current_window)
-        save_xml = QPushButton("Save XML")
-        save_xml.clicked.connect(self._save_xml)
+        load_xml_design = QPushButton("Load Session XML")
+        load_xml_design.clicked.connect(self._load_xml)
         edit_map = QPushButton("Edit Channel Groups")
         edit_map.clicked.connect(self._edit_channel_map)
-        load_xml_design = QPushButton("Load XML")
-        load_xml_design.clicked.connect(self._load_xml)
+        save_xml = QPushButton("Save Session XML")
+        save_xml.clicked.connect(self._save_xml)
+        self.spectrogram_button = QPushButton("Spectrogram")
+        self.spectrogram_button.clicked.connect(self._show_spectrogram_window)
+        self.csd_enabled = QPushButton("Current Source Density")
+        self.csd_enabled.setCheckable(True)
+        self.csd_enabled.setToolTip("Overlay relative current source density on the recording traces")
+        self.csd_enabled.toggled.connect(self._refresh_viewer_layout)
+        self.csd_cmap = QComboBox()
+        self.csd_cmap.addItems(list(CSD_COLORMAPS))
+        self.csd_cmap.setCurrentText("bwr")
+        self.csd_cmap.currentTextChanged.connect(self._refresh_viewer_layout)
         shortcuts = QPushButton("Keyboard Shortcuts")
         shortcuts.clicked.connect(self._show_shortcuts)
 
         layout.addLayout(form)
+        layout.addWidget(self._build_probe_section())
         layout.addWidget(load_xml_design)
         layout.addWidget(edit_map)
-        layout.addWidget(save_xml)
         bad_form = QFormLayout()
         bad_form.addRow("Bad channels", self.bad_channels_text)
         layout.addLayout(bad_form)
+        layout.addWidget(save_xml)
         layout.addWidget(self.ignore_bad_channels)
-        layout.addWidget(self.streaming_mode)
-        layout.addWidget(self._build_filter_panel())
-        layout.addWidget(self._build_brain_regions_section())
+        self.brain_regions_section = self._build_brain_regions_section()
+        self.filter_panel = self._build_filter_panel()
+        layout.addWidget(self.brain_regions_section)
+        layout.addWidget(self.filter_panel)
         layout.addStretch(1)
+        layout.addWidget(self.streaming_mode)
         layout.addWidget(shortcuts)
         return panel
+
+    def _build_probe_section(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 8, 0, 0)
+        layout.setSpacing(4)
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("Probes")
+        title.setStyleSheet("font-weight: 600;")
+        add_probe = QPushButton("+")
+        add_probe.setFixedWidth(32)
+        add_probe.clicked.connect(self._add_probe)
+        self.remove_probe_button = QPushButton("-")
+        self.remove_probe_button.setFixedWidth(32)
+        self.remove_probe_button.clicked.connect(self._remove_probe)
+        header.addWidget(title)
+        header.addStretch(1)
+        header.addWidget(self.remove_probe_button)
+        header.addWidget(add_probe)
+        self.probe_rows = QWidget()
+        self.probe_rows_layout = QVBoxLayout(self.probe_rows)
+        self.probe_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.probe_rows_layout.setSpacing(6)
+        layout.addLayout(header)
+        layout.addWidget(self.probe_rows)
+        self._refresh_probe_controls()
+        return panel
+
+    def _refresh_probe_controls(self) -> None:
+        if not hasattr(self, "probe_rows_layout"):
+            return
+        while self.probe_rows_layout.count():
+            item = self.probe_rows_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        for index, probe in enumerate(self.probes):
+            row_panel = QWidget()
+            row_layout = QVBoxLayout(row_panel)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(3)
+            title = QLabel(f"Probe {index + 1}")
+            title.setStyleSheet("font-weight: 600; color: #d6dde8;")
+            controls = QHBoxLayout()
+            controls.setContentsMargins(0, 0, 0, 0)
+            channels = QSpinBox()
+            channels.setRange(1, 4096)
+            channels.setValue(probe.n_channels)
+            channels.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+            channels.valueChanged.connect(lambda value, probe_index=index: self._probe_n_channels_changed(probe_index, value))
+            load_xml = QPushButton("Probe XML")
+            load_xml.clicked.connect(lambda checked=False, probe_index=index: self._load_probe_xml(probe_index))
+            controls.addWidget(QLabel("nChannels"))
+            controls.addWidget(channels)
+            controls.addWidget(load_xml, 1)
+            row_layout.addWidget(title)
+            row_layout.addLayout(controls)
+            if probe.xml_path is not None:
+                loaded = QLabel(probe.xml_path.name)
+                loaded.setWordWrap(True)
+                row_layout.addWidget(loaded)
+            self.probe_rows_layout.addWidget(row_panel)
+        self._update_total_n_channels_label()
+        if hasattr(self, "remove_probe_button"):
+            self.remove_probe_button.setEnabled(len(self.probes) > 1)
+
+    def _add_probe(self) -> None:
+        self.probes.append(ProbeConfig(self._default_probe_n_channels()))
+        self._refresh_probe_controls()
+        self._apply_probe_configs_to_model()
+
+    def _remove_probe(self) -> None:
+        if len(self.probes) <= 1:
+            self.statusBar().showMessage("At least one probe must remain", 2500)
+            return
+        self.probes.pop()
+        self._refresh_probe_controls()
+        self._apply_probe_configs_to_model()
+
+    def _default_probe_n_channels(self) -> int:
+        return self.probes[-1].n_channels if self.probes else max(1, self.n_channels.value())
+
+    def _probe_n_channels_changed(self, probe_index: int, value: int) -> None:
+        if not (0 <= probe_index < len(self.probes)):
+            return
+        probe = self.probes[probe_index]
+        self.probes[probe_index] = ProbeConfig(int(value))
+        if probe.xml_path is not None:
+            self.statusBar().showMessage(f"Cleared Probe {probe_index + 1} XML because nChannels was edited", 5000)
+        self._apply_probe_configs_to_model()
+
+    def _load_probe_xml(self, probe_index: int) -> None:
+        if not (0 <= probe_index < len(self.probes)):
+            return
+        start = ""
+        current = self.probes[probe_index].xml_path
+        if current is not None:
+            start = str(current.parent)
+        elif self.dat_path.text().strip():
+            selected = Path(self.dat_path.text().strip())
+            start = str(selected if selected.is_dir() else selected.parent)
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            f"Load XML for Probe {probe_index + 1}",
+            start,
+            "XML files (*.xml);;All files (*)",
+        )
+        if not path:
+            return
+        xml_path = Path(path)
+        try:
+            metadata, groups, bad = parse_neurosuite_xml(xml_path)
+        except XmlError as exc:
+            QMessageBox.critical(self, "XML Error", str(exc))
+            return
+        self.probes[probe_index] = ProbeConfig(
+            n_channels=metadata.n_channels,
+            xml_path=xml_path,
+            groups=groups,
+            bad_channels=bad,
+        )
+        if probe_index == 0:
+            self.sampling_rate.setValue(metadata.sampling_rate)
+            if metadata.lfp_sampling_rate > 0:
+                self.lfp_sampling_rate.setValue(metadata.lfp_sampling_rate)
+        self._refresh_probe_controls()
+        self._apply_probe_configs_to_model()
+        self.statusBar().showMessage(f"Loaded Probe {probe_index + 1} XML: {xml_path.name}", 5000)
+
+    def _apply_probe_configs_to_model(self) -> None:
+        total, groups, bad = self._merged_probe_model()
+        self._group_source = "probe"
+        self.loaded_metadata = RecordingMetadata(
+            n_channels=total,
+            sampling_rate=self.sampling_rate.value(),
+            lfp_sampling_rate=self.lfp_sampling_rate.value(),
+        )
+        self._set_total_n_channels(total)
+        self.groups = groups
+        self.group_designs = group_designs_from_groups(groups)
+        self._reset_visible_groups()
+        self.bad_channels = bad
+        self.bad_channels_text.setText(", ".join(str(ch) for ch in sorted(bad)))
+        self.channel_regions = {
+            channel: label
+            for channel, label in self.channel_regions.items()
+            if 0 <= channel < total
+        }
+        self._reset_colors()
+        self._refresh_region_summary()
+        self._refresh_all()
+
+    def _merged_probe_model(self) -> tuple[int, list[ChannelGroup], set[int]]:
+        total = 0
+        merged_groups: list[ChannelGroup] = []
+        merged_bad: set[int] = set()
+        for probe_index, probe in enumerate(self.probes):
+            offset = total
+            if probe.groups:
+                for group in probe.groups:
+                    merged_groups.append(
+                        ChannelGroup(
+                            f"Probe {probe_index + 1} {group.name}",
+                            [channel + offset for channel in group.channels],
+                        )
+                    )
+                merged_bad.update(channel + offset for channel in probe.bad_channels)
+            else:
+                merged_groups.append(
+                    ChannelGroup(
+                        f"Probe {probe_index + 1}",
+                        list(range(offset, offset + probe.n_channels)),
+                    )
+                )
+            total += probe.n_channels
+        return total, merged_groups, merged_bad
+
+    def _set_total_n_channels(self, n_channels: int) -> None:
+        self.n_channels.blockSignals(True)
+        self.n_channels.setValue(max(1, int(n_channels)))
+        self.n_channels.blockSignals(False)
+        self._update_total_n_channels_label()
+
+    def _update_total_n_channels_label(self) -> None:
+        if hasattr(self, "total_n_channels_label"):
+            self.total_n_channels_label.setText(str(sum(probe.n_channels for probe in self.probes)))
 
     def _build_brain_regions_section(self) -> QWidget:
         panel = QWidget()
@@ -288,6 +525,21 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.region_summary)
         return panel
 
+    def _build_analysis_tab(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setSpacing(8)
+        cmap_row = QHBoxLayout()
+        cmap_row.setContentsMargins(0, 0, 0, 0)
+        cmap_row.addWidget(QLabel("CSD cmap"))
+        cmap_row.addWidget(self.csd_cmap, 1)
+
+        layout.addWidget(self.spectrogram_button)
+        layout.addWidget(self.csd_enabled)
+        layout.addLayout(cmap_row)
+        layout.addStretch(1)
+        return panel
+
     def _build_spikes_tab(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
@@ -301,7 +553,7 @@ class MainWindow(QMainWindow):
         self.spikes_per_group = QCheckBox("Per probe group")
         self.spikes_cmap = QComboBox()
         self.spikes_cmap.addItems(COLOR_MAP_NAMES)
-        self.spikes_cmap.setCurrentText("rainbow")
+        self.spikes_cmap.setCurrentText("plasma")
         for widget in [self.show_spikes, self.spikes_show_waveforms, self.spikes_per_region, self.spikes_per_group]:
             widget.toggled.connect(self._refresh_spike_overlay)
         self.spikes_below.toggled.connect(self._spikes_below_changed)
@@ -403,9 +655,11 @@ class MainWindow(QMainWindow):
     def _build_filter_panel(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 4, 0, 4)
+        layout.setContentsMargins(0, 10, 0, 4)
         layout.setSpacing(4)
 
+        section_label = QLabel("Filters")
+        section_label.setStyleSheet("font-weight: 600;")
         bandpass_row = QHBoxLayout()
         bandpass_row.setContentsMargins(0, 0, 0, 0)
         bandpass_row.addWidget(self.bandpass_low)
@@ -414,6 +668,7 @@ class MainWindow(QMainWindow):
         bandpass_row.addWidget(QLabel("Hz"))
         bandpass_row.addStretch(1)
 
+        layout.addWidget(section_label)
         layout.addWidget(self.bandpass_enabled)
         layout.addLayout(bandpass_row)
         layout.addWidget(self.car_enabled)
@@ -526,6 +781,12 @@ class MainWindow(QMainWindow):
         self.probe_viewer = ProbeViewer()
         self.probe_viewer.channelDoubleClicked.connect(self._toggle_bad_channel)
         self.probe_viewer.groupClicked.connect(self._toggle_group_visibility)
+        self.channel_profile_viewer = ChannelProfileViewer()
+        self.channel_tabs = QTabWidget()
+        self.channel_tabs.setUsesScrollButtons(False)
+        self.channel_tabs.addTab(self.probe_viewer, "Ch map")
+        self.channel_tabs.addTab(self.channel_profile_viewer, "Ch profile")
+        self.channel_tabs.currentChanged.connect(self._channel_view_tab_changed)
         self.color_map = QComboBox()
         self.color_map.addItems(COLOR_MAP_NAMES)
         self.color_map.setCurrentText("summer")
@@ -545,14 +806,32 @@ class MainWindow(QMainWindow):
         self.region_cmap_panel = QWidget()
         self.region_cmap_layout = QFormLayout(self.region_cmap_panel)
         self.region_cmap_panel.setVisible(False)
-        layout.addWidget(self.probe_viewer, 1)
+        layout.addWidget(self.channel_tabs, 1)
         layout.addLayout(color_row)
         layout.addLayout(color_mode_row)
         layout.addWidget(self.region_cmap_panel)
         return panel
 
     def _browse_dat(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "Select basepath or session folder", "")
+        path = QFileDialog.getExistingDirectory(self, "Select basepath or session folder", self._recording_dialog_start_path())
+        if path:
+            self.dat_path.setText(path)
+            self._dat_path_committed()
+
+    def _recording_dialog_start_path(self) -> str:
+        text = self.dat_path.text().strip()
+        if not text:
+            return ""
+        current = Path(text)
+        return str(current.parent if current.is_file() else current)
+
+    def _browse_dat_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select .dat recording file",
+            self._recording_dialog_start_path(),
+            "DAT files (*.dat);;All files (*)",
+        )
         if path:
             self.dat_path.setText(path)
             self._dat_path_committed()
@@ -723,25 +1002,41 @@ class MainWindow(QMainWindow):
             self._load_window(silent=True)
 
     def _load_recording_window(self, *, silent: bool = False) -> None:
+        result = self._read_recording_window_data(
+            self._window_start_seconds(),
+            self._window_duration_seconds(),
+            silent=silent,
+        )
+        if result is None:
+            return
+        self._current_time, self._raw_data = result
+        self._current_data = self._process_window_data(self._raw_data)
+        self._refresh_viewer_layout()
+        self._refresh_spectrogram_window_from_current_data()
+
+    def _read_recording_window_data(
+        self,
+        start: float,
+        duration: float,
+        *,
+        silent: bool = False,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
         infos = self._recording_dat_infos()
         if not infos:
-            return
+            return None
         self._update_recording_epoch_metadata(infos)
         total_duration = sum(info.duration_seconds for info in infos)
-        start = self._window_start_seconds()
-        duration = self._window_duration_seconds()
+        start = max(0.0, float(start))
+        duration = max(self._minimum_window_duration_seconds(), float(duration))
         if start >= total_duration:
             if not silent:
                 QMessageBox.critical(self, "DAT Error", "Requested window is outside the recording.")
-            return
+            return None
         time_parts: list[np.ndarray] = []
         data_parts: list[np.ndarray] = []
         remaining_start = start
         remaining_duration = duration
         offset = 0.0
-        clipped = False
-        first_start_frame = 0
-        first_frame_set = False
         for info in infos:
             if remaining_duration <= 0:
                 break
@@ -764,24 +1059,16 @@ class MainWindow(QMainWindow):
             except (DatReaderError, OSError) as exc:
                 if not silent:
                     QMessageBox.critical(self, "DAT Error", str(exc))
-                return
-            if not first_frame_set:
-                first_start_frame = int(round(start * self.sampling_rate.value()))
-                first_frame_set = True
+                return None
             if window.time_seconds.size:
                 time_parts.append(window.time_seconds + offset)
                 data_parts.append(window.data)
-            if window.clipped or local_duration < remaining_duration:
-                clipped = clipped or window.clipped
             remaining_duration -= local_duration
             remaining_start = 0.0
             offset += seg_duration
         if not time_parts or not data_parts:
-            return
-        self._current_time = np.concatenate(time_parts, axis=0)
-        self._raw_data = np.concatenate(data_parts, axis=0)
-        self._current_data = self._process_window_data(self._raw_data)
-        self._refresh_viewer_layout()
+            return None
+        return np.concatenate(time_parts, axis=0), np.concatenate(data_parts, axis=0)
 
     def _dat_path_committed(self) -> None:
         path = self.dat_path.text().strip()
@@ -790,7 +1077,9 @@ class MainWindow(QMainWindow):
         try:
             self._recording_dat_paths = self._resolve_recording_dat_paths(Path(path))
             primary_dat_path = self._recording_dat_paths[0]
-            self._load_adjacent_xml_if_present(primary_dat_path)
+            loaded_xml = self._load_adjacent_xml_if_present(primary_dat_path)
+            if not loaded_xml:
+                self._use_default_linear_probe()
             total_duration = sum(info.duration_seconds for info in self._recording_dat_infos())
         except DatReaderError as exc:
             QMessageBox.critical(self, "Recording Path Error", str(exc))
@@ -799,7 +1088,7 @@ class MainWindow(QMainWindow):
         self.record_window_start_seconds = 0.0
         self.record_window_duration_seconds = min(
             1.0,
-            max(0.001, total_duration),
+            max(self._minimum_window_duration_seconds(), total_duration),
         )
         if not self._is_sleep_scoring_active():
             self._apply_window_controls_to_widgets(self.record_window_start_seconds, self.record_window_duration_seconds)
@@ -905,12 +1194,14 @@ class MainWindow(QMainWindow):
         if path:
             self._apply_xml_metadata(Path(path))
 
-    def _load_adjacent_xml_if_present(self, dat_path: Path) -> None:
+    def _load_adjacent_xml_if_present(self, dat_path: Path) -> bool:
         xml_path = self._resolve_adjacent_xml_path(dat_path)
         if xml_path is None:
-            return
+            return False
         if xml_path.exists():
             self._apply_xml_metadata(xml_path, show_status=True)
+            return True
+        return False
 
     def _resolve_adjacent_xml_path(self, dat_path: Path) -> Path | None:
         candidates: list[Path] = []
@@ -935,12 +1226,26 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "XML Error", str(exc))
             return
         self.loaded_metadata = metadata
+        self._group_source = "xml"
+        for widget in [self.n_channels, self.sampling_rate, self.lfp_sampling_rate]:
+            widget.blockSignals(True)
         self.n_channels.setValue(metadata.n_channels)
         self.sampling_rate.setValue(metadata.sampling_rate)
         if metadata.lfp_sampling_rate > 0:
             self.lfp_sampling_rate.setValue(metadata.lfp_sampling_rate)
+        for widget in [self.n_channels, self.sampling_rate, self.lfp_sampling_rate]:
+            widget.blockSignals(False)
         self.groups = groups
         self.group_designs = group_designs_from_groups(groups)
+        self.probes = [
+            ProbeConfig(
+                n_channels=metadata.n_channels,
+                xml_path=path,
+                groups=groups,
+                bad_channels=bad,
+            )
+        ]
+        self._refresh_probe_controls()
         self._reset_visible_groups()
         self.bad_channels = bad
         self.bad_channels_text.setText(", ".join(str(ch) for ch in sorted(bad)))
@@ -1075,13 +1380,21 @@ class MainWindow(QMainWindow):
 
         self.event_series = []
         errors: list[str] = []
+        seen_event_keys: set[str] = set()
         for event_file in find_event_files(base_dirs, basenames):
             try:
-                self.event_series.append(load_event_file(event_file))
+                event = load_event_file(event_file)
             except EventLoadError as exc:
                 errors.append(str(exc))
+                continue
+            key = self._event_key(event)
+            if key in seen_event_keys:
+                continue
+            seen_event_keys.add(key)
+            self.event_series.append(event)
         if self.event_series:
-            names = ", ".join(event.name for event in self.event_series)
+            display_names = self._event_display_names()
+            names = ", ".join(display_names[self._event_key(event)] for event in self.event_series)
             self.events_status.setText(f"Events: {names}")
         elif errors:
             self.events_status.setText(f"Events: {errors[0]}")
@@ -1106,18 +1419,22 @@ class MainWindow(QMainWindow):
         return result
 
     def _rebuild_event_controls(self) -> None:
+        self._event_navigation_anchor = None
+        selected_key = self._selected_event_key
         while self.events_list_layout.count():
             item = self.events_list_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
         self.event_controls = {}
+        self.event_display_names = self._event_display_names()
         headers = ["Name", "Show", "Intervals", "Peaks", "Below"]
         for column, header in enumerate(headers):
             label = QLabel(header)
             label.setStyleSheet("font-weight: 600; color: #d6dde8;")
             self.events_list_layout.addWidget(label, 0, column)
         for row, event in enumerate(self.event_series, start=1):
+            key = self._event_key(event)
             show = QCheckBox()
             intervals = QCheckBox()
             peaks = QCheckBox()
@@ -1130,18 +1447,72 @@ class MainWindow(QMainWindow):
                 peaks.setEnabled(False)
             for checkbox in [show, intervals, peaks, below]:
                 checkbox.toggled.connect(self._refresh_event_overlay)
-            name = QLabel(f"{event.name} ({event.timestamps.shape[0]})")
+            display_name = self.event_display_names.get(key, event.name)
+            name = QPushButton(f"{display_name} ({event.timestamps.shape[0]})")
+            name.setFlat(True)
+            name.clicked.connect(lambda checked=False, event_key=key: self._select_event_for_navigation(event_key))
             self.events_list_layout.addWidget(name, row, 0)
             self.events_list_layout.addWidget(show, row, 1)
             self.events_list_layout.addWidget(intervals, row, 2)
             self.events_list_layout.addWidget(peaks, row, 3)
             self.events_list_layout.addWidget(below, row, 4)
-            self.event_controls[event.name] = {
+            self.event_controls[key] = {
                 "show": show,
                 "intervals": intervals,
                 "peaks": peaks,
                 "below": below,
+                "name": name,
             }
+        if selected_key not in self.event_controls:
+            self._selected_event_key = None
+        self._refresh_event_selection_styles()
+
+    def _select_event_for_navigation(self, event_key: str) -> None:
+        if event_key not in self.event_controls:
+            return
+        self._selected_event_key = event_key
+        self._event_navigation_anchor = None
+        self._refresh_event_selection_styles()
+
+    def _refresh_event_selection_styles(self) -> None:
+        for key, controls in self.event_controls.items():
+            name = controls.get("name")
+            if name is None:
+                continue
+            selected = key == self._selected_event_key
+            name.setStyleSheet(
+                "QPushButton {"
+                " text-align: left;"
+                " padding: 2px 4px;"
+                " border-radius: 3px;"
+                " border: 1px solid transparent;"
+                f" color: {'#ffd8d8' if selected else '#d6dde8'};"
+                f" background-color: {'#5a2528' if selected else 'transparent'};"
+                f" font-weight: {'600' if selected else '400'};"
+                "}"
+                "QPushButton:hover {"
+                f" background-color: {'#6b2d31' if selected else '#333842'};"
+                "}"
+            )
+
+    def _event_key(self, event: EventSeries) -> str:
+        try:
+            return str(event.path.resolve())
+        except OSError:
+            return str(event.path)
+
+    def _event_display_names(self) -> dict[str, str]:
+        counts: dict[str, int] = {}
+        for event in self.event_series:
+            counts[event.name] = counts.get(event.name, 0) + 1
+        display_names: dict[str, str] = {}
+        for event in self.event_series:
+            key = self._event_key(event)
+            if counts.get(event.name, 0) > 1:
+                display_names[key] = f"{event.name} [{event.path.name}]"
+            else:
+                display_names[key] = event.name
+        return display_names
 
     def _spike_grouping_changed(self, mode: str, checked: bool) -> None:
         if checked and mode == "region" and self.spikes_per_group.isChecked():
@@ -1265,9 +1636,12 @@ class MainWindow(QMainWindow):
         if self.spikes_data is not None:
             unit_colors: dict[int, str] = {}
             groups: dict[str, list] = {}
-            for unit in self.spikes_data.units:
-                if not self._spike_unit_is_visible(unit):
-                    continue
+            ordered_units = [
+                unit
+                for unit in self._ordered_spike_units_for_display()
+                if self._spike_unit_is_visible(unit)
+            ]
+            for unit in ordered_units:
                 groups.setdefault(self._spike_group_label(unit), []).append(unit)
             for group_label, units in groups.items():
                 cmap = self.spike_group_cmaps.get(group_label)
@@ -1275,9 +1649,7 @@ class MainWindow(QMainWindow):
                 colors = palette_from_name(cmap_name, max(1, len(units)))
                 for index, unit in enumerate(units):
                     unit_colors[unit.uid] = colors[index % len(colors)]
-            for unit in self._ordered_spike_units_for_display():
-                if not self._spike_unit_is_visible(unit):
-                    continue
+            for unit in ordered_units:
                 overlays.append(
                     SignalSpikeOverlay(
                         unit_id=unit.uid,
@@ -1321,12 +1693,13 @@ class MainWindow(QMainWindow):
             return
         overlays: list[SignalEventOverlay] = []
         for index, event in enumerate(self.event_series):
-            controls = self.event_controls.get(event.name)
+            key = self._event_key(event)
+            controls = self.event_controls.get(key)
             if controls is None or not controls["show"].isChecked():
                 continue
             overlays.append(
                 SignalEventOverlay(
-                    name=event.name,
+                    name=self.event_display_names.get(key, event.name),
                     color=self._event_overlay_color(),
                     timestamps=event.timestamps,
                     peaks=event.peaks,
@@ -1342,8 +1715,12 @@ class MainWindow(QMainWindow):
         return "#20242a" if background == "white" else "#ffffff"
 
     def _primary_event_for_navigation(self) -> EventSeries | None:
+        if self._selected_event_key is not None:
+            for event in self.event_series:
+                if self._event_key(event) == self._selected_event_key:
+                    return event
         for event in self.event_series:
-            controls = self.event_controls.get(event.name)
+            controls = self.event_controls.get(self._event_key(event))
             if controls is not None and controls["show"].isChecked():
                 return event
         return self.event_series[0] if self.event_series else None
@@ -1357,23 +1734,56 @@ class MainWindow(QMainWindow):
         except ValueError:
             return
         event_id = max(1, min(event.timestamps.shape[0], event_id))
-        self.event_id_text.setText(str(event_id))
-        start, end = event.timestamps[event_id - 1]
-        center = (float(start) + float(end)) * 0.5
-        self._set_window_start_seconds(max(0.0, center - self._window_duration_seconds() * 0.5))
-        self._load_window(silent=True)
+        self._jump_to_event_index(event, event_id - 1)
 
     def _step_event_id(self, step: int) -> None:
         event = self._primary_event_for_navigation()
         if event is None:
             return
+        centers = self._event_centers(event)
+        if centers.size == 0:
+            return
+        current_index = self._event_navigation_index(event, centers)
+        if current_index is None:
+            window_center = self._window_start_seconds() + self._window_duration_seconds() * 0.5
+            event_index = int(np.argmin(np.abs(centers - window_center)))
+        else:
+            event_index = current_index + (1 if step > 0 else -1)
+            if event_index < 0 or event_index >= centers.size:
+                return
+        self._jump_to_event_index(event, event_index)
+
+    def _event_navigation_index(self, event: EventSeries, centers: np.ndarray) -> int | None:
+        anchor = self._event_navigation_anchor
+        if anchor is None:
+            return None
+        event_key, event_index = anchor
+        if event_key != self._event_key(event):
+            return None
+        if not (0 <= event_index < centers.size):
+            return None
+        return event_index
+
+    def _jump_to_event_index(self, event: EventSeries, event_index: int) -> None:
+        event_index = max(0, min(event.timestamps.shape[0] - 1, int(event_index)))
+        self.event_id_text.setText(str(event_index + 1))
+        self._selected_event_key = self._event_key(event)
+        self._refresh_event_selection_styles()
+        start, end = event.timestamps[event_index]
+        center = (float(start) + float(end)) * 0.5
+        self._setting_event_navigation_window = True
         try:
-            current = int(self.event_id_text.text().strip())
-        except ValueError:
-            current = 1
-        next_id = max(1, min(event.timestamps.shape[0], current + step))
-        self.event_id_text.setText(str(next_id))
-        self._jump_to_event_id()
+            self._set_window_start_seconds(max(0.0, center - self._window_duration_seconds() * 0.5))
+        finally:
+            self._setting_event_navigation_window = False
+        self._event_navigation_anchor = (self._event_key(event), event_index)
+        self._load_window(silent=True)
+
+    def _event_centers(self, event: EventSeries) -> np.ndarray:
+        timestamps = np.asarray(event.timestamps, dtype=float)
+        if timestamps.ndim != 2 or timestamps.shape[0] == 0:
+            return np.asarray([], dtype=float)
+        return np.mean(timestamps[:, :2], axis=1)
 
     def _refresh_region_summary(self) -> None:
         if not hasattr(self, "region_summary"):
@@ -1581,9 +1991,11 @@ class MainWindow(QMainWindow):
         self._refresh_sleep_plot_window()
 
     def _generate_groups(self) -> None:
+        self._group_source = "default"
         self._initialize_manual_designs()
         self.groups = self._groups_from_group_designs()
         self._reset_visible_groups()
+        self._reset_colors()
         self._refresh_all()
 
     def _initialize_manual_designs(self) -> None:
@@ -1595,6 +2007,42 @@ class MainWindow(QMainWindow):
     def _groups_from_group_designs(self) -> list[ChannelGroup]:
         return [design.group(index) for index, design in enumerate(self.group_designs)]
 
+    def _n_channels_changed(self) -> None:
+        if self._group_source == "default":
+            self.probes = [ProbeConfig(self.n_channels.value())]
+            self._refresh_probe_controls()
+            self._set_default_linear_probe()
+            self._reset_colors()
+            self._refresh_region_summary()
+        self._refresh_all()
+
+    def _use_default_linear_probe(self) -> None:
+        if self._group_source == "manual":
+            return
+        self._group_source = "default"
+        self._set_default_linear_probe()
+        self._reset_colors()
+        self._refresh_region_summary()
+
+    def _set_default_linear_probe(self) -> None:
+        n_channels = self.n_channels.value()
+        channels = list(range(n_channels))
+        self.loaded_metadata = RecordingMetadata(
+            n_channels=n_channels,
+            sampling_rate=self.sampling_rate.value(),
+            lfp_sampling_rate=self.lfp_sampling_rate.value(),
+        )
+        self.probes = [ProbeConfig(n_channels)]
+        self._refresh_probe_controls()
+        self.group_designs = [GroupDesign("group1", n_channels, channels)]
+        self.groups = [ChannelGroup("group1", channels)]
+        self._reset_visible_groups()
+        self.channel_regions = {
+            channel: label
+            for channel, label in self.channel_regions.items()
+            if 0 <= channel < n_channels
+        }
+
     def _edit_channel_map(self) -> None:
         self._initialize_manual_designs()
         dialog = ChannelMapDialog(
@@ -1605,6 +2053,7 @@ class MainWindow(QMainWindow):
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
+        self._group_source = "manual"
         self.group_designs = dialog.designs
         self.groups = dialog.groups()
         self._reset_visible_groups()
@@ -1821,6 +2270,71 @@ class MainWindow(QMainWindow):
     def _load_window(self, *, silent: bool = False) -> None:
         self._load_recording_window(silent=silent)
 
+    def _show_spectrogram_window(self) -> None:
+        if self._is_sleep_scoring_active():
+            QMessageBox.information(self, "Spectrogram", "Switch to Recording, Spikes, or Events to inspect recording channels.")
+            return
+        if getattr(self, "_current_data", None) is None:
+            self._load_window(silent=False)
+        data = getattr(self, "_current_data", None)
+        time = getattr(self, "_current_time", None)
+        if data is None or time is None or np.asarray(data).ndim != 2 or np.asarray(data).size == 0:
+            QMessageBox.information(self, "Spectrogram", "Load a DAT window before opening the spectrogram.")
+            return
+        dialog = ChannelSpectrogramDialog(
+            time,
+            data,
+            sampling_rate=self.sampling_rate.value(),
+            window_start_seconds=self._window_start_seconds(),
+            window_duration_seconds=self._window_duration_seconds(),
+            total_duration_seconds=self._current_recording_duration_seconds(),
+            window_loader=self._load_spectrogram_window_data,
+            window_changed_callback=self._apply_spectrogram_window_to_recording,
+            streaming=self.streaming_mode.isChecked(),
+            parent=self,
+        )
+        self.spectrogram_window = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _load_spectrogram_window_data(
+        self,
+        start: float,
+        duration: float,
+    ) -> tuple[np.ndarray, np.ndarray] | None:
+        result = self._read_recording_window_data(start, duration, silent=True)
+        if result is None:
+            return None
+        time, raw = result
+        return time, self._process_window_data(raw)
+
+    def _apply_spectrogram_window_to_recording(self, start: float, duration: float) -> None:
+        self._set_window_duration_seconds(float(duration))
+        self._set_window_start_seconds(float(start))
+        self._load_window(silent=True)
+
+    def _set_spectrogram_streaming_mode(self, enabled: bool) -> None:
+        dialog = getattr(self, "spectrogram_window", None)
+        if dialog is not None:
+            dialog.set_streaming_mode(enabled)
+
+    def _refresh_spectrogram_window_from_current_data(self) -> None:
+        dialog = getattr(self, "spectrogram_window", None)
+        if dialog is None:
+            return
+        data = getattr(self, "_current_data", None)
+        time = getattr(self, "_current_time", None)
+        if data is None or time is None:
+            return
+        dialog.update_recording_window(
+            time,
+            data,
+            window_start_seconds=self._window_start_seconds(),
+            window_duration_seconds=self._window_duration_seconds(),
+            streaming=self.streaming_mode.isChecked(),
+        )
+
     def _reprocess_current_window(self) -> None:
         raw = getattr(self, "_raw_data", None)
         if raw is None:
@@ -1881,6 +2395,10 @@ class MainWindow(QMainWindow):
             layout = single_column_layout(layout_groups, self.bad_channels, self.channel_colors)
         self.viewer.set_viewport_height(self.signal_scroll.viewport().height())
         self.viewer.set_background_mode(self.signal_background.currentText() if hasattr(self, "signal_background") else "black")
+        self.viewer.set_csd_overlay(
+            self.csd_enabled.isChecked() if hasattr(self, "csd_enabled") else False,
+            self.csd_cmap.currentText() if hasattr(self, "csd_cmap") else "bwr",
+        )
         self.viewer.set_traces(
             time,
             data,
@@ -1897,6 +2415,62 @@ class MainWindow(QMainWindow):
             self.channel_colors,
             self.visible_groups,
         )
+        if self._is_channel_profile_tab_active():
+            self._refresh_channel_profile()
+
+    def _channel_view_tab_changed(self, index: int) -> None:
+        if self._is_channel_profile_tab_active():
+            if getattr(self, "_current_data", None) is None:
+                self._load_window(silent=True)
+            self._refresh_channel_profile()
+
+    def _refresh_channel_profile_if_visible(self) -> None:
+        if self._is_channel_profile_tab_active():
+            self._refresh_channel_profile()
+
+    def _is_channel_profile_tab_active(self) -> bool:
+        return (
+            hasattr(self, "channel_tabs")
+            and hasattr(self, "channel_profile_viewer")
+            and self.channel_tabs.currentWidget() is self.channel_profile_viewer
+        )
+
+    def _refresh_channel_profile(self) -> None:
+        data = getattr(self, "_current_data", None)
+        if data is None:
+            self.channel_profile_viewer.clear()
+            return
+        scale, unit = self._channel_profile_scale()
+        try:
+            rms = channel_rms(data, scale)
+        except ValueError:
+            self.channel_profile_viewer.clear()
+            return
+        self.channel_profile_viewer.set_profile(
+            rms,
+            self._visible_groups(),
+            self.bad_channels,
+            self.channel_colors,
+            unit=unit,
+            subtitle=self._channel_profile_subtitle(),
+        )
+
+    def _channel_profile_scale(self) -> tuple[float, str]:
+        if self.loaded_metadata.least_significant_bit is not None:
+            return float(self.loaded_metadata.least_significant_bit), "uV"
+        n_bits = self.loaded_metadata.n_bits
+        voltage_range = self.loaded_metadata.voltage_range
+        amplification = self.loaded_metadata.amplification
+        if n_bits and voltage_range and amplification:
+            scale = float(voltage_range) / float(amplification) / float(2**int(n_bits)) * 1_000_000.0
+            if np.isfinite(scale) and scale > 0:
+                return scale, "uV"
+        return 1.0, "counts"
+
+    def _channel_profile_subtitle(self) -> str:
+        start = self._window_start_seconds()
+        duration = self._window_duration_seconds()
+        return f"{start:.3f}-{start + duration:.3f}s"
 
     def _visible_groups(self) -> list[ChannelGroup]:
         visible_indices = self._effective_visible_group_indices()
@@ -1931,16 +2505,6 @@ class MainWindow(QMainWindow):
         if not path:
             return
         save_path = Path(path)
-        if save_path.exists():
-            answer = QMessageBox.question(
-                self,
-                "Overwrite XML?",
-                f"{save_path.name} already exists.\nOverwrite this XML file?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
         save_path.write_text(xml, encoding="utf-8")
         QMessageBox.information(self, "Saved", f"Saved XML to {path}")
 
@@ -1953,13 +2517,14 @@ class MainWindow(QMainWindow):
             + self.duration_seconds.value()
             + self.duration_msec.value() / 1000.0
         )
-        return max(0.001, duration)
+        return max(self._minimum_window_duration_seconds(), duration)
 
     def _set_window_duration_seconds(self, value: float, *, persist: bool = True) -> None:
-        value = max(0.001, value)
-        total_msec = int(round(value * 1000.0))
-        minutes, rem = divmod(total_msec, 60000)
-        seconds, msec = divmod(rem, 1000)
+        value = max(self._minimum_window_duration_seconds(), value)
+        total_usec = int(round(value * 1_000_000.0))
+        minutes, rem = divmod(total_usec, 60_000_000)
+        seconds, usec = divmod(rem, 1_000_000)
+        msec = usec / 1000.0
         for widget in [self.duration_minutes, self.duration_seconds, self.duration_msec]:
             widget.blockSignals(True)
         self.duration_minutes.setValue(minutes)
@@ -1978,10 +2543,13 @@ class MainWindow(QMainWindow):
         self._update_stream_timer_interval()
 
     def _set_window_start_seconds(self, value: float, *, persist: bool = True) -> None:
+        if hasattr(self, "_event_navigation_anchor") and not getattr(self, "_setting_event_navigation_window", False):
+            self._event_navigation_anchor = None
         value = max(0.0, value)
-        total_msec = int(round(value * 1000.0))
-        minutes, rem = divmod(total_msec, 60000)
-        seconds, msec = divmod(rem, 1000)
+        total_usec = int(round(value * 1_000_000.0))
+        minutes, rem = divmod(total_usec, 60_000_000)
+        seconds, usec = divmod(rem, 1_000_000)
+        msec = usec / 1000.0
         for widget in [self.start_minutes, self.start_seconds, self.start_msec]:
             widget.blockSignals(True)
         self.start_minutes.setValue(minutes)
@@ -2007,6 +2575,12 @@ class MainWindow(QMainWindow):
             self._refresh_viewer_layout()
             self._refresh_recording_overview()
         self._update_stream_timer_interval()
+
+    def _minimum_window_duration_seconds(self) -> float:
+        sampling_rate = self.sampling_rate.value() if hasattr(self, "sampling_rate") else 0.0
+        if sampling_rate > 0:
+            return max(1e-6, 1.0 / float(sampling_rate))
+        return 1e-6
 
     def _apply_window_controls(self) -> None:
         self._store_current_window_controls()
@@ -2085,7 +2659,7 @@ class MainWindow(QMainWindow):
             if event.key() == Qt.Key.Key_BracketLeft:
                 self.spacing.setValue(max(self.spacing.minimum(), self.spacing.value() / 1.15))
                 return True
-        if self._is_events_active() and self.event_id_text.text().strip():
+        if self._is_events_active():
             if event.key() == Qt.Key.Key_Right:
                 self._step_event_id(1)
                 return True
@@ -2118,10 +2692,11 @@ class MainWindow(QMainWindow):
 
     def _zoom_time_window(self, factor: float, *, anchor_fraction: float = 0.0) -> None:
         old_duration = self._window_duration_seconds()
-        new_duration = max(0.001, old_duration * factor)
+        minimum_duration = self._minimum_window_duration_seconds()
+        new_duration = max(minimum_duration, old_duration * factor)
         recording_duration = self._current_recording_duration_seconds()
         if recording_duration is not None:
-            new_duration = min(new_duration, max(0.001, recording_duration))
+            new_duration = min(new_duration, max(minimum_duration, recording_duration))
         start = self._window_start_seconds()
         anchor_fraction = max(0.0, min(1.0, float(anchor_fraction)))
         anchor_time = start + old_duration * anchor_fraction
@@ -2219,7 +2794,7 @@ class MainWindow(QMainWindow):
         position = 0 if max_start <= 0 else round(self._window_start_seconds() / max_start * self.time_scroll.maximum())
         page_step = round(self._window_duration_seconds() / recording_duration_seconds * self.time_scroll.maximum())
         self._updating_time_scroll = True
-        self.time_scroll.setPageStep(max(1, page_step))
+        self.time_scroll.setPageStep(max(1, min(self.time_scroll.maximum(), page_step)))
         self.time_scroll.setValue(max(0, min(self.time_scroll.maximum(), position)))
         self._updating_time_scroll = False
 
@@ -2260,12 +2835,14 @@ class MainWindow(QMainWindow):
 
     def _set_streaming_enabled(self, enabled: bool) -> None:
         if enabled:
+            self._set_spectrogram_streaming_mode(True)
             self._update_stream_timer_interval()
             self._stream_latest_window()
             self.stream_timer.start()
             self.statusBar().showMessage("Streaming mode on", 3000)
         else:
             self.stream_timer.stop()
+            self._set_spectrogram_streaming_mode(False)
             self.statusBar().showMessage("Streaming mode off", 3000)
 
     def _update_stream_timer_interval(self) -> None:
@@ -2346,8 +2923,10 @@ class MainWindow(QMainWindow):
         return channels
 
 
-def run() -> int:
+def run(argv: list[str] | None = None) -> int:
     app = QApplication.instance() or QApplication([])
-    window = MainWindow()
+    args = sys.argv[1:] if argv is None else argv
+    initial_path = next((arg for arg in args if not arg.startswith("-")), None)
+    window = MainWindow(initial_path=initial_path)
     window.show()
     return app.exec()

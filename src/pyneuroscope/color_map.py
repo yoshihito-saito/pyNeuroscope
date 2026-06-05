@@ -18,23 +18,25 @@ DEFAULT_PALETTE = [
 ]
 
 COLOR_MAPS = {
-    "white": ["#cfd5df"],
     "black": ["#394150"],
-    "rainbow": ["#2d5bff", "#00a4ff", "#00d084", "#d8e52d", "#ff9d00", "#ff3d3d", "#b032ff"],
-    "Greys": ["#f7f7f7", "#d9d9d9", "#969696", "#525252", "#111111"],
-    "Purples": ["#fcfbfd", "#dadaeb", "#9e9ac8", "#6a51a3", "#3f007d"],
-    "Blues": ["#f7fbff", "#c6dbef", "#6baed6", "#2171b5", "#08306b"],
-    "Greens": ["#f7fcf5", "#c7e9c0", "#74c476", "#238b45", "#00441b"],
-    "Oranges": ["#fff5eb", "#fdd0a2", "#fd8d3c", "#d94801", "#7f2704"],
-    "Reds": ["#fff5f0", "#fcbba1", "#fb6a4a", "#cb181d", "#67000d"],
+    "white": ["#cfd5df"],
+    "Greys": ["#bdbdbd", "#969696", "#737373", "#525252", "#252525"],
+    "Purples": ["#bcbddc", "#9e9ac8", "#807dba", "#6a51a3", "#54278f"],
+    "Blues": ["#9ecae1", "#6baed6", "#4292c6", "#2171b5", "#08519c"],
+    "Greens": ["#a1d99b", "#74c476", "#41ab5d", "#238b45", "#006d2c"],
+    "Oranges": ["#fdae6b", "#fd8d3c", "#f16913", "#d94801", "#a63603"],
+    "Reds": ["#fc9272", "#fb6a4a", "#ef3b2c", "#cb181d", "#a50f15"],
+    "viridis": ["#440154", "#3b528b", "#21918c", "#5ec962", "#fde725"],
+    "plasma": ["#0d0887", "#7e03a8", "#cc4778", "#f89540", "#f0f921"],
+    "inferno": ["#000004", "#57106e", "#bc3754", "#f98e09", "#fcffa4"],
+    "magma": ["#000004", "#51127c", "#b73779", "#fc8961", "#fcfdbf"],
     "spring": ["#ff00ff", "#ff40bf", "#ff8080", "#ffbf40", "#ffff00"],
     "summer": ["#008066", "#40a666", "#80cc66", "#bff266", "#ffff66"],
     "autumn": ["#ff0000", "#ff4000", "#ff8000", "#ffbf00", "#ffff00"],
     "winter": ["#0000ff", "#0040df", "#0080bf", "#00bf9f", "#00ff80"],
     "cool": ["#00ffff", "#40bfff", "#8080ff", "#bf40ff", "#ff00ff"],
-    "hot": ["#0b0000", "#800000", "#ff0000", "#ffbf00", "#ffffff"],
-    "plasma": ["#0d0887", "#7e03a8", "#cc4778", "#f89540", "#f0f921"],
-    "gray": ["#202020", "#606060", "#a0a0a0", "#e0e0e0"],
+    "Wistia": ["#e4ff7a", "#ffed3f", "#ffc917", "#ff9a00", "#fc4e00"],
+    "rainbow": ["#2d5bff", "#00a4ff", "#00d084", "#d8e52d", "#ff9d00", "#ff3d3d", "#b032ff"],
 }
 
 COLOR_MAP_NAMES = list(COLOR_MAPS)

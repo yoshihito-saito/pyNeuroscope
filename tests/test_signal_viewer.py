@@ -103,3 +103,98 @@ def test_spike_raster_restores_painter_clip() -> None:
 
     assert painter.saved == 1
     assert painter.restored == 1
+
+
+def test_white_background_overlay_color_uses_gentle_dimming() -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    viewer = SignalViewer()
+    viewer.set_background_mode("white")
+
+    color = viewer._overlay_color("#ffff00")
+
+    assert color.red() == 178
+    assert color.green() == 178
+    assert color.blue() == 0
+
+
+def test_csd_image_interpolates_vertically_to_target_height() -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    viewer = SignalViewer()
+    csd = np.asarray(
+        [
+            [-1.0, 1.0],
+            [0.0, 0.0],
+            [1.0, -1.0],
+        ]
+    )
+
+    image = viewer._csd_image(csd, target_height=24)
+
+    assert image.height() == 24
+    assert image.width() == 3
+
+
+def test_csd_segments_split_at_bad_channels() -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    viewer = SignalViewer()
+    items = [
+        TraceLayoutItem(0, 0, 0, 0, "#ffffff", False),
+        TraceLayoutItem(1, 0, 1, 0, "#ffffff", False),
+        TraceLayoutItem(2, 0, 2, 0, "#ffffff", False),
+        TraceLayoutItem(3, 0, 3, 0, "#ffffff", True),
+        TraceLayoutItem(4, 0, 4, 0, "#ffffff", False),
+        TraceLayoutItem(5, 0, 5, 0, "#ffffff", False),
+        TraceLayoutItem(6, 0, 6, 0, "#ffffff", False),
+        TraceLayoutItem(7, 0, 7, 0, "#ffffff", False),
+    ]
+
+    segments = viewer._csd_valid_segments(items)
+
+    assert [[item.channel for item in segment] for segment in segments] == [[0, 1, 2], [4, 5, 6, 7]]
+
+
+def test_csd_segments_drop_runs_shorter_than_three_channels() -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    viewer = SignalViewer()
+    items = [
+        TraceLayoutItem(0, 0, 0, 0, "#ffffff", False),
+        TraceLayoutItem(1, 0, 1, 0, "#ffffff", False),
+        TraceLayoutItem(2, 0, 2, 0, "#ffffff", True),
+        TraceLayoutItem(3, 0, 3, 0, "#ffffff", False),
+        TraceLayoutItem(4, 0, 4, 0, "#ffffff", False),
+        TraceLayoutItem(5, 0, 5, 0, "#ffffff", False),
+    ]
+
+    segments = viewer._csd_valid_segments(items)
+
+    assert [[item.channel for item in segment] for segment in segments] == [[3, 4, 5]]
+
+
+def test_csd_display_data_decimates_to_1250_hz() -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    viewer = SignalViewer()
+    sampling_rate = 20000.0
+    time = np.arange(0.0, 1.0, 1.0 / sampling_rate)
+    data = np.column_stack((time, time * 2.0))
+
+    reduced = viewer._csd_display_data(data, time, max_points=2000)
+
+    assert 1200 <= reduced.shape[0] <= 1250
+
+
+def test_csd_display_data_also_caps_very_long_windows_by_screen_bins() -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    viewer = SignalViewer()
+    sampling_rate = 1250.0
+    time = np.arange(0.0, 10.0, 1.0 / sampling_rate)
+    data = np.column_stack((time, time * 2.0))
+
+    reduced = viewer._csd_display_data(data, time, max_points=100)
+
+    assert reduced.shape[0] <= 250

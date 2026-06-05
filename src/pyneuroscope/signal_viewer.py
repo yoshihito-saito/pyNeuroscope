@@ -4,9 +4,11 @@ from typing import Sequence
 
 import numpy as np
 from PySide6.QtCore import QPoint, QPointF, QRect, Qt
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
+from matplotlib import colormaps
 
+from .csd import CSD_COLORMAPS, robust_csd_limits, standard_1d_csd
 from .models import SignalEventOverlay, SignalSpikeOverlay
 from .signal_layout import TraceLayoutItem
 
@@ -32,6 +34,9 @@ class SignalViewer(QWidget):
         self._spike_waveforms = False
         self._event_overlays: list[SignalEventOverlay] = []
         self._background_mode = "black"
+        self._show_csd = False
+        self._csd_colormap_name = CSD_COLORMAPS[0]
+        self._csd_color_lut = self._build_colormap_lut(self._csd_colormap_name)
         self.setMinimumHeight(360)
         self.setMinimumWidth(520)
         self.setAutoFillBackground(True)
@@ -79,6 +84,14 @@ class SignalViewer(QWidget):
 
     def set_background_mode(self, mode: str) -> None:
         self._background_mode = "white" if str(mode).lower() == "white" else "black"
+        self.update()
+
+    def set_csd_overlay(self, show: bool, colormap_name: str = "bwr") -> None:
+        self._show_csd = bool(show)
+        clean = colormap_name if colormap_name in CSD_COLORMAPS else CSD_COLORMAPS[0]
+        if clean != self._csd_colormap_name:
+            self._csd_colormap_name = clean
+            self._csd_color_lut = self._build_colormap_lut(clean)
         self.update()
 
     def set_viewport_height(self, height: int) -> None:
@@ -135,14 +148,29 @@ class SignalViewer(QWidget):
             painter.drawLine(int(x0 + label_gutter), margin_top, int(x0 + label_gutter), height - margin_bottom)
 
         trace_width = max(8.0, column_width - label_gutter - 8)
-        max_points = max(2, int(trace_width))
+        max_points = max(2, int(trace_width / 2))
         start_index, end_index = self._visible_sample_bounds(data.shape[0])
         visible_data = data[start_index:end_index]
         visible_time = self._time_seconds[start_index:end_index]
+        csd_data = self._csd_display_data(visible_data, visible_time, max_points)
         step = max(1, visible_data.shape[0] // max_points)
         sampled_data = visible_data[::step]
         x_values = np.linspace(0, 1, sampled_data.shape[0], dtype=np.float64)
         item_geometries: dict[int, tuple[float, float, float, float, float, float]] = {}
+
+        if self._show_csd and csd_data.shape[0] >= 2:
+            self._draw_csd_background(
+                painter,
+                csd_data,
+                visible_items,
+                rows_by_column,
+                margin_left,
+                column_width,
+                label_gutter,
+                trace_width,
+                margin_top,
+                trace_bottom,
+            )
 
         if visible_time.size >= 2:
             self._draw_signal_event_overlays(
@@ -183,7 +211,7 @@ class SignalViewer(QWidget):
                 path.lineTo(QPointF(x, y))
 
             pen = QPen(QColor("#5f6670") if item.is_bad else QColor(item.color))
-            pen.setWidth(1)
+            pen.setWidthF(1.1)
             painter.setPen(pen)
             painter.drawPath(path)
             if self._show_channel_labels and trace_height >= 5.0 and label_gutter >= 28:
@@ -294,7 +322,7 @@ class SignalViewer(QWidget):
         red, green, blue = qcolor.red(), qcolor.green(), qcolor.blue()
         luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
         if self._background_mode == "white" and luminance > 145:
-            factor = 0.48
+            factor = 0.70
             return QColor(int(red * factor), int(green * factor), int(blue * factor))
         if self._background_mode == "black" and luminance < 80:
             return QColor(
@@ -303,6 +331,161 @@ class SignalViewer(QWidget):
                 min(255, int(blue + (255 - blue) * 0.35)),
             )
         return qcolor
+
+    def _csd_display_data(
+        self,
+        visible_data: np.ndarray,
+        visible_time: np.ndarray,
+        max_points: int,
+        *,
+        target_hz: float = 1250.0,
+    ) -> np.ndarray:
+        if visible_data.ndim != 2 or visible_data.shape[0] <= 2:
+            return visible_data
+        step = 1
+        if visible_time.size >= 2:
+            dt = float(np.nanmedian(np.diff(visible_time)))
+            if np.isfinite(dt) and dt > 0:
+                sampling_rate = 1.0 / dt
+                step = max(step, int(np.ceil((sampling_rate / target_hz) - 1e-9)))
+        step = max(step, visible_data.shape[0] // max(2, max_points * 2))
+        return visible_data[::step]
+
+    def _draw_csd_background(
+        self,
+        painter: QPainter,
+        sampled_data: np.ndarray,
+        visible_items: Sequence[TraceLayoutItem],
+        rows_by_column: dict[int, int],
+        margin_left: float,
+        column_width: float,
+        label_gutter: float,
+        trace_width: float,
+        margin_top: float,
+        trace_bottom: float,
+    ) -> None:
+        if sampled_data.ndim != 2 or sampled_data.shape[0] < 2:
+            return
+        grouped: dict[tuple[int, int], list[TraceLayoutItem]] = {}
+        for item in visible_items:
+            if 0 <= item.channel < sampled_data.shape[1]:
+                grouped.setdefault((item.column, item.group_index), []).append(item)
+
+        for (column, _group_index), items in grouped.items():
+            ordered = sorted(items, key=lambda item: item.row)
+            for segment in self._csd_valid_segments(ordered):
+                self._draw_csd_segment(
+                    painter,
+                    sampled_data,
+                    segment,
+                    rows_by_column,
+                    column,
+                    margin_left,
+                    column_width,
+                    label_gutter,
+                    trace_width,
+                    margin_top,
+                    trace_bottom,
+                )
+
+    def _draw_csd_segment(
+        self,
+        painter: QPainter,
+        sampled_data: np.ndarray,
+        ordered: Sequence[TraceLayoutItem],
+        rows_by_column: dict[int, int],
+        column: int,
+        margin_left: float,
+        column_width: float,
+        label_gutter: float,
+        trace_width: float,
+        margin_top: float,
+        trace_bottom: float,
+    ) -> None:
+        if len(ordered) < 3:
+            return
+        channels = [item.channel for item in ordered]
+        try:
+            csd = standard_1d_csd(sampled_data, channels)
+        except ValueError:
+            return
+        if csd.size == 0:
+            return
+        rows = max(1, rows_by_column.get(column, len(ordered)))
+        trace_height = max(1.0, (trace_bottom - margin_top) / rows)
+        top_row = min(item.row for item in ordered)
+        bottom_row = max(item.row for item in ordered) + 1
+        top = margin_top + top_row * trace_height
+        bottom = margin_top + bottom_row * trace_height
+        if bottom <= top:
+            return
+        left = margin_left + column * column_width + label_gutter
+        target_height = max(1, int(bottom - top))
+        image = self._csd_image(csd, target_height=target_height)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        painter.setOpacity(1.0)
+        painter.drawImage(
+            QRect(
+                int(left),
+                int(top),
+                max(1, int(trace_width)),
+                max(1, int(bottom - top)),
+            ),
+            image,
+        )
+        painter.setOpacity(1.0)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+
+    def _csd_valid_segments(self, ordered: Sequence[TraceLayoutItem]) -> list[list[TraceLayoutItem]]:
+        segments: list[list[TraceLayoutItem]] = []
+        current: list[TraceLayoutItem] = []
+        for item in ordered:
+            if item.is_bad:
+                if len(current) >= 3:
+                    segments.append(current)
+                current = []
+                continue
+            current.append(item)
+        if len(current) >= 3:
+            segments.append(current)
+        return segments
+
+    def _csd_image(self, csd: np.ndarray, *, target_height: int | None = None) -> QImage:
+        values = np.asarray(csd, dtype=np.float64).T
+        if values.size == 0:
+            return QImage(1, 1, QImage.Format.Format_RGBA8888)
+        values = self._interpolate_csd_vertical(values, target_height)
+        low, high = robust_csd_limits(values)
+        scaled = np.clip((values - low) / max(1e-12, high - low), 0.0, 1.0)
+        indices = np.rint(scaled * 255).astype(np.uint8)
+        rgba = np.ascontiguousarray(self._csd_color_lut[indices])
+        image = QImage(
+            rgba.data,
+            rgba.shape[1],
+            rgba.shape[0],
+            rgba.strides[0],
+            QImage.Format.Format_RGBA8888,
+        )
+        return image.copy()
+
+    def _interpolate_csd_vertical(self, values: np.ndarray, target_height: int | None) -> np.ndarray:
+        if target_height is None or target_height <= values.shape[0] or values.shape[0] < 2:
+            return values
+        source_y = np.linspace(0.0, 1.0, values.shape[0], dtype=np.float64)
+        target_y = np.linspace(0.0, 1.0, int(target_height), dtype=np.float64)
+        interpolated = np.empty((target_y.size, values.shape[1]), dtype=np.float64)
+        for column in range(values.shape[1]):
+            interpolated[:, column] = np.interp(target_y, source_y, values[:, column])
+        return interpolated
+
+    def _build_colormap_lut(self, name: str) -> np.ndarray:
+        try:
+            cmap = colormaps[name]
+        except KeyError:
+            cmap = colormaps[CSD_COLORMAPS[0]]
+        rgba = np.asarray(cmap(np.linspace(0.0, 1.0, 256)) * 255, dtype=np.uint8)
+        rgba[:, 3] = 255
+        return np.ascontiguousarray(rgba)
 
     def _bottom_overlay_height(self) -> int:
         return self._below_spike_height() + self._below_gap_height() + self._below_event_height()
