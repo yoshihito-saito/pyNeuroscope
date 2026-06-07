@@ -16,12 +16,21 @@ python -m PyInstaller --clean --noconfirm pyneuroscope.spec
 $appDir = Join-Path $RepoRoot "dist\pyNeuroscope"
 $probeXmlSource = Join-Path $RepoRoot "probe_xmls"
 $probeXmlTarget = Join-Path $appDir "probe_xmls"
+$probeGeometrySource = Join-Path $RepoRoot "probe_geometry"
+$probeGeometryTarget = Join-Path $appDir "probe_geometry"
 
 if (Test-Path $probeXmlSource) {
     if (Test-Path $probeXmlTarget) {
         Remove-Item -LiteralPath $probeXmlTarget -Recurse -Force
     }
     Copy-Item -LiteralPath $probeXmlSource -Destination $probeXmlTarget -Recurse
+}
+
+if (Test-Path $probeGeometrySource) {
+    if (Test-Path $probeGeometryTarget) {
+        Remove-Item -LiteralPath $probeGeometryTarget -Recurse -Force
+    }
+    Copy-Item -LiteralPath $probeGeometrySource -Destination $probeGeometryTarget -Recurse
 }
 
 Write-Host ""
@@ -35,6 +44,12 @@ if (Test-Path $probeXmlTarget) {
     Write-Host ""
     Write-Host "Included related probe XML folder:"
     Write-Host "  $probeXmlTarget"
+}
+
+if (Test-Path $probeGeometryTarget) {
+    Write-Host ""
+    Write-Host "Included probe geometry folder:"
+    Write-Host "  $probeGeometryTarget"
 }
 
 if ($Zip) {
