@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QApplication
 
 from pyneuroscope.models import SignalSpikeOverlay
 from pyneuroscope.signal_layout import TraceLayoutItem
-from pyneuroscope.signal_viewer import SignalViewer
+from pyneuroscope.signal_viewer import SignalViewer, _csd_depths
 
 
 def test_group_column_x_selection_uses_drag_start_column() -> None:
@@ -54,6 +54,22 @@ def test_group_column_x_selection_can_drag_backward_in_start_column() -> None:
 
     assert 0.20 < left < 0.30
     assert 0.70 < right < 0.80
+
+
+def test_geometry_columns_use_compact_spacing_mode() -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    viewer = SignalViewer()
+    items = [
+        TraceLayoutItem(0, 0, 0, 0, "#ffffff", False, x=-10.0),
+        TraceLayoutItem(1, 0, 1, 1, "#ffffff", False, x=10.0),
+    ]
+
+    viewer.set_traces(None, None, items)
+    viewer._show_channel_labels = False
+
+    assert viewer._uses_compact_geometry_columns()
+    assert len(viewer._trace_x_regions()) == 2
 
 
 class FakePainter:
@@ -172,6 +188,26 @@ def test_csd_segments_drop_runs_shorter_than_three_channels() -> None:
     segments = viewer._csd_valid_segments(items)
 
     assert [[item.channel for item in segment] for segment in segments] == [[3, 4, 5]]
+
+
+def test_csd_depths_use_geometry_y_when_strictly_ordered() -> None:
+    items = [
+        TraceLayoutItem(0, 0, 0, 0, "#ffffff", False, y=-60.0),
+        TraceLayoutItem(1, 0, 1, 0, "#ffffff", False, y=-40.0),
+        TraceLayoutItem(2, 0, 2, 0, "#ffffff", False, y=-10.0),
+    ]
+
+    assert _csd_depths(items) == [-60.0, -40.0, -10.0]
+
+
+def test_csd_depths_fall_back_without_monotonic_geometry() -> None:
+    items = [
+        TraceLayoutItem(0, 0, 0, 0, "#ffffff", False, y=-20.0),
+        TraceLayoutItem(1, 0, 1, 0, "#ffffff", False, y=-40.0),
+        TraceLayoutItem(2, 0, 2, 0, "#ffffff", False, y=-10.0),
+    ]
+
+    assert _csd_depths(items) is None
 
 
 def test_csd_display_data_decimates_to_1250_hz() -> None:

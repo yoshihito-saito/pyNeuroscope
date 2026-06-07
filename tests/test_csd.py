@@ -22,6 +22,29 @@ def test_standard_1d_csd_quadratic_has_expected_sign() -> None:
     assert np.allclose(csd, -2.0)
 
 
+def test_standard_1d_csd_uses_nonuniform_depth_spacing() -> None:
+    depths = np.asarray([0.0, 1.0, 3.0, 6.0])
+    normalized = depths / np.median(np.diff(depths))
+    quadratic = np.tile(normalized**2, (3, 1))
+
+    csd = standard_1d_csd(
+        quadratic,
+        range(4),
+        depths=depths,
+        subtract_channel_mean=False,
+    )
+
+    assert csd.shape == (3, 2)
+    assert np.allclose(csd, -2.0)
+
+
+def test_standard_1d_csd_rejects_invalid_depths() -> None:
+    data = np.zeros((3, 3))
+
+    with pytest.raises(ValueError):
+        standard_1d_csd(data, [0, 1, 2], depths=[0.0, 1.0, 1.0])
+
+
 def test_standard_1d_csd_validates_channels() -> None:
     data = np.zeros((3, 2))
 

@@ -127,11 +127,12 @@ class SignalViewer(QWidget):
         data = self._data
         width = max(1, self.width())
         height = max(1, self.height())
-        margin_left = 50
+        compact_geometry_columns = self._uses_compact_geometry_columns()
+        margin_left = 38 if compact_geometry_columns else 50
         margin_right = 10
         margin_top = 24
         margin_bottom = 24
-        label_gutter = 38
+        label_gutter = 12 if compact_geometry_columns else 38
         bottom_overlay_height = self._bottom_overlay_height()
         trace_bottom = max(margin_top + 24, height - margin_bottom - bottom_overlay_height)
         visible_items = self._visible_layout_items()
@@ -315,6 +316,9 @@ class SignalViewer(QWidget):
             }
         return QColor(colors.get(role, colors["text"]))
 
+    def _uses_compact_geometry_columns(self) -> bool:
+        return (not self._show_channel_labels) and any(item.x is not None for item in self._layout_items)
+
     def _overlay_color(self, color: str) -> QColor:
         qcolor = QColor(color)
         if not qcolor.isValid():
@@ -405,8 +409,9 @@ class SignalViewer(QWidget):
         if len(ordered) < 3:
             return
         channels = [item.channel for item in ordered]
+        depths = _csd_depths(ordered)
         try:
-            csd = standard_1d_csd(sampled_data, channels)
+            csd = standard_1d_csd(sampled_data, channels, depths=depths)
         except ValueError:
             return
         if csd.size == 0:
@@ -855,6 +860,8 @@ class SignalViewer(QWidget):
                 column=item.column,
                 color=item.color,
                 is_bad=item.is_bad,
+                x=item.x,
+                y=item.y,
             )
             for item in self._layout_items
             if start <= item.row < end
@@ -982,3 +989,14 @@ def _samples_at_times(time: np.ndarray, trace: np.ndarray, times: np.ndarray) ->
     choose_previous = np.abs(time[previous] - times) < np.abs(time[indices] - times)
     indices = np.where(choose_previous, previous, indices)
     return trace[indices].astype(float)
+
+
+def _csd_depths(ordered: Sequence[TraceLayoutItem]) -> list[float] | None:
+    if not ordered or any(item.y is None for item in ordered):
+        return None
+    depths = [float(item.y) for item in ordered]
+    if len(set(depths)) != len(depths):
+        return None
+    if any(right <= left for left, right in zip(depths, depths[1:])):
+        return None
+    return depths

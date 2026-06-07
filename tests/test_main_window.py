@@ -7,6 +7,7 @@ import pytest
 from pathlib import Path
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QApplication, QLabel, QPushButton
+from scipy.io import savemat
 from types import SimpleNamespace
 
 from pyneuroscope.channel_profile_viewer import channel_rms
@@ -77,6 +78,7 @@ def test_session_xml_buttons_use_requested_labels() -> None:
     button_labels = [button.text() for button in window.findChildren(QPushButton)]
 
     assert "Load Session XML" in button_labels
+    assert "Load Session ChannelMap" in button_labels
     assert "Edit Channel Groups" in button_labels
     assert "Save Session XML" in button_labels
     assert "Save XML" not in button_labels
@@ -103,11 +105,12 @@ def test_session_xml_and_bad_channels_order() -> None:
         return -1
 
     load_index = top_level_index(button_by_label["Load Session XML"])
+    chanmap_index = top_level_index(button_by_label["Load Session ChannelMap"])
     edit_index = top_level_index(button_by_label["Edit Channel Groups"])
     bad_channels_index = top_level_index(window.bad_channels_text)
     save_index = top_level_index(button_by_label["Save Session XML"])
 
-    assert load_index < edit_index < bad_channels_index < save_index
+    assert load_index < chanmap_index < edit_index < bad_channels_index < save_index
 
 
 def test_browse_folder_commits_selected_recording_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -620,6 +623,31 @@ def test_probe_xml_loads_are_offset_and_merged(tmp_path: Path, monkeypatch: pyte
     assert window.total_n_channels_label.text() == "5"
     assert [group.channels for group in window.groups] == [[1, 0], [2, 4]]
     assert window.bad_channels == {1, 4}
+
+
+def test_load_session_chanmap_button_sets_explicit_geometry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    window = MainWindow()
+    mat_path = tmp_path / "custom_chanMap.mat"
+    savemat(
+        mat_path,
+        {
+            "chanMap0ind": [[1]],
+            "xcoords": [[42]],
+            "ycoords": [[-12]],
+        },
+    )
+    monkeypatch.setattr(
+        "pyneuroscope.main_window.QFileDialog.getOpenFileName",
+        lambda *args, **kwargs: (str(mat_path), "MAT files (*.mat)"),
+    )
+
+    window._load_session_chanmap()
+
+    assert window._chanmap_geometry_path == mat_path
+    assert window.probes[0].probe_type == ""
+    assert window._probe_channel_geometry()[1].x == 42
 
 
 def test_recording_discovery_accepts_explicit_dat_file(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -50,6 +50,14 @@ from .csd import CSD_COLORMAPS
 from .dat_reader import DatReaderError, inspect_dat, read_dat_window
 from .event_io import EventLoadError, candidate_analysis_dirs, find_event_files, find_spikes_file, load_event_file, load_spikes_cellinfo
 from .models import ChannelGroup, EventSeries, RecordingMetadata, SignalEventOverlay, SignalSpikeOverlay, SpikesData
+from .probe_geometry import (
+    ProbeGeometryError,
+    ProbeSitePosition,
+    available_probe_geometries,
+    find_chanmap_file,
+    load_chanmap_geometry,
+    load_probe_geometry,
+)
 from .probe_viewer import ProbeViewer
 from .recording_overview import RecordingOverviewWidget
 from .signal_layout import group_column_layout, single_column_layout
@@ -68,6 +76,7 @@ class ProbeConfig:
     xml_path: Path | None = None
     groups: list[ChannelGroup] | None = None
     bad_channels: set[int] = field(default_factory=set)
+    probe_type: str = ""
 
 
 class MainWindow(QMainWindow):
@@ -79,6 +88,8 @@ class MainWindow(QMainWindow):
         self.groups: list[ChannelGroup] = []
         self.group_designs: list[GroupDesign] = []
         self.probes: list[ProbeConfig] = [ProbeConfig(4)]
+        self._probe_geometry_names = available_probe_geometries()
+        self._chanmap_geometry_path: Path | None = None
         self.bad_channels: set[int] = set()
         self.visible_groups: set[int] = set()
         self.channel_colors: dict[int, str] = {}
@@ -280,6 +291,8 @@ class MainWindow(QMainWindow):
         self.car_mode.currentTextChanged.connect(self._reprocess_current_window)
         load_xml_design = QPushButton("Load Session XML")
         load_xml_design.clicked.connect(self._load_xml)
+        load_chanmap = QPushButton("Load Session ChannelMap")
+        load_chanmap.clicked.connect(self._load_session_chanmap)
         edit_map = QPushButton("Edit Channel Groups")
         edit_map.clicked.connect(self._edit_channel_map)
         save_xml = QPushButton("Save Session XML")
@@ -300,6 +313,7 @@ class MainWindow(QMainWindow):
         layout.addLayout(form)
         layout.addWidget(self._build_probe_section())
         layout.addWidget(load_xml_design)
+        layout.addWidget(load_chanmap)
         layout.addWidget(edit_map)
         bad_form = QFormLayout()
         bad_form.addRow("Bad channels", self.bad_channels_text)
@@ -356,21 +370,49 @@ class MainWindow(QMainWindow):
             row_layout = QVBoxLayout(row_panel)
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(3)
+            title_row = QHBoxLayout()
+            title_row.setContentsMargins(0, 0, 0, 0)
             title = QLabel(f"Probe {index + 1}")
             title.setStyleSheet("font-weight: 600; color: #d6dde8;")
+            load_xml = QPushButton("Probe XML")
+            load_xml.clicked.connect(lambda checked=False, probe_index=index: self._load_probe_xml(probe_index))
+            title_row.addWidget(title)
+            title_row.addStretch(1)
+            title_row.addWidget(load_xml)
             controls = QHBoxLayout()
             controls.setContentsMargins(0, 0, 0, 0)
+            controls.setSpacing(5)
             channels = QSpinBox()
             channels.setRange(1, 4096)
             channels.setValue(probe.n_channels)
             channels.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
             channels.valueChanged.connect(lambda value, probe_index=index: self._probe_n_channels_changed(probe_index, value))
-            load_xml = QPushButton("Probe XML")
-            load_xml.clicked.connect(lambda checked=False, probe_index=index: self._load_probe_xml(probe_index))
+            probe_type = QComboBox()
+            probe_type.addItem("default", "")
+            for name in self._probe_geometry_names:
+                probe_type.addItem(name, name)
+            if probe.probe_type and probe_type.findData(probe.probe_type) == -1:
+                probe_type.addItem(f"{probe.probe_type} (missing)", probe.probe_type)
+            type_index = probe_type.findData(probe.probe_type)
+            probe_type.setCurrentIndex(max(0, type_index))
+            probe_type.setMinimumContentsLength(18)
+            probe_type.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            probe_type.setMinimumWidth(180)
+            probe_type.setToolTip(probe_type.currentText())
+            for item_index in range(probe_type.count()):
+                probe_type.setItemData(item_index, probe_type.itemText(item_index), Qt.ItemDataRole.ToolTipRole)
+            probe_type.currentIndexChanged.connect(
+                lambda _index, combo=probe_type, probe_index=index: self._probe_type_changed(
+                    probe_index,
+                    str(combo.currentData() or ""),
+                )
+            )
+            probe_type.currentTextChanged.connect(probe_type.setToolTip)
             controls.addWidget(QLabel("nChannels"))
             controls.addWidget(channels)
-            controls.addWidget(load_xml, 1)
-            row_layout.addWidget(title)
+            controls.addWidget(QLabel("type"))
+            controls.addWidget(probe_type, 1)
+            row_layout.addLayout(title_row)
             row_layout.addLayout(controls)
             if probe.xml_path is not None:
                 loaded = QLabel(probe.xml_path.name)
@@ -382,7 +424,7 @@ class MainWindow(QMainWindow):
             self.remove_probe_button.setEnabled(len(self.probes) > 1)
 
     def _add_probe(self) -> None:
-        self.probes.append(ProbeConfig(self._default_probe_n_channels()))
+        self.probes.append(ProbeConfig(self._default_probe_n_channels(), probe_type=self._default_probe_type()))
         self._refresh_probe_controls()
         self._apply_probe_configs_to_model()
 
@@ -397,14 +439,30 @@ class MainWindow(QMainWindow):
     def _default_probe_n_channels(self) -> int:
         return self.probes[-1].n_channels if self.probes else max(1, self.n_channels.value())
 
+    def _default_probe_type(self) -> str:
+        return self.probes[-1].probe_type if self.probes else ""
+
     def _probe_n_channels_changed(self, probe_index: int, value: int) -> None:
         if not (0 <= probe_index < len(self.probes)):
             return
         probe = self.probes[probe_index]
-        self.probes[probe_index] = ProbeConfig(int(value))
+        self.probes[probe_index] = ProbeConfig(int(value), probe_type=probe.probe_type)
         if probe.xml_path is not None:
             self.statusBar().showMessage(f"Cleared Probe {probe_index + 1} XML because nChannels was edited", 5000)
         self._apply_probe_configs_to_model()
+
+    def _probe_type_changed(self, probe_index: int, probe_type: str) -> None:
+        if not (0 <= probe_index < len(self.probes)):
+            return
+        probe = self.probes[probe_index]
+        self.probes[probe_index] = ProbeConfig(
+            n_channels=probe.n_channels,
+            xml_path=probe.xml_path,
+            groups=probe.groups,
+            bad_channels=set(probe.bad_channels),
+            probe_type=probe_type,
+        )
+        self._refresh_viewer_layout()
 
     def _load_probe_xml(self, probe_index: int) -> None:
         if not (0 <= probe_index < len(self.probes)):
@@ -435,6 +493,7 @@ class MainWindow(QMainWindow):
             xml_path=xml_path,
             groups=groups,
             bad_channels=bad,
+            probe_type=self.probes[probe_index].probe_type,
         )
         if probe_index == 0:
             self.sampling_rate.setValue(metadata.sampling_rate)
@@ -1193,6 +1252,34 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Load amplifier.xml", start, "XML files (*.xml);;All files (*)")
         if path:
             self._apply_xml_metadata(Path(path))
+
+    def _load_session_chanmap(self) -> None:
+        start = ""
+        if self._chanmap_geometry_path is not None:
+            start = str(self._chanmap_geometry_path.parent)
+        elif self.dat_path.text().strip():
+            selected = Path(self.dat_path.text().strip())
+            start = str(selected if selected.is_dir() else selected.parent)
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load Session ChannelMap",
+            start,
+            "MAT files (*.mat);;All files (*)",
+        )
+        if not path:
+            return
+        chanmap_path = Path(path)
+        try:
+            geometry = load_chanmap_geometry(chanmap_path)
+        except ProbeGeometryError as exc:
+            QMessageBox.critical(self, "ChannelMap Error", str(exc))
+            return
+        if not geometry:
+            QMessageBox.critical(self, "ChannelMap Error", f"No geometry found in {chanmap_path.name}")
+            return
+        self._chanmap_geometry_path = chanmap_path
+        self._refresh_viewer_layout()
+        self.statusBar().showMessage(f"Loaded ChannelMap: {chanmap_path.name}", 5000)
 
     def _load_adjacent_xml_if_present(self, dat_path: Path) -> bool:
         xml_path = self._resolve_adjacent_xml_path(dat_path)
@@ -2387,12 +2474,23 @@ class MainWindow(QMainWindow):
     def _refresh_viewer_layout(self) -> None:
         time = getattr(self, "_current_time", None)
         data = getattr(self, "_current_data", None)
+        channel_geometry = self._probe_channel_geometry()
         if self.view_mode.currentText() == "group_columns":
             layout_groups = self._visible_groups()
-            layout = group_column_layout(layout_groups, self.bad_channels, self.channel_colors)
+            layout = group_column_layout(
+                layout_groups,
+                self.bad_channels,
+                self.channel_colors,
+                channel_geometry=channel_geometry,
+            )
         else:
             layout_groups = self._visible_groups()
-            layout = single_column_layout(layout_groups, self.bad_channels, self.channel_colors)
+            layout = single_column_layout(
+                layout_groups,
+                self.bad_channels,
+                self.channel_colors,
+                channel_geometry=channel_geometry,
+            )
         self.viewer.set_viewport_height(self.signal_scroll.viewport().height())
         self.viewer.set_background_mode(self.signal_background.currentText() if hasattr(self, "signal_background") else "black")
         self.viewer.set_csd_overlay(
@@ -2414,9 +2512,57 @@ class MainWindow(QMainWindow):
             self.bad_channels,
             self.channel_colors,
             self.visible_groups,
+            channel_geometry,
         )
         if self._is_channel_profile_tab_active():
             self._refresh_channel_profile()
+
+    def _probe_channel_geometry(self) -> dict[int, ProbeSitePosition]:
+        if self._chanmap_geometry_path is not None:
+            return self._chanmap_channel_geometry()
+
+        geometry_by_channel: dict[int, ProbeSitePosition] = {}
+        offset = 0
+        for probe_index, probe in enumerate(self.probes):
+            if probe.probe_type:
+                try:
+                    geometry = load_probe_geometry(probe.probe_type)
+                except ProbeGeometryError as exc:
+                    self.statusBar().showMessage(f"Probe {probe_index + 1} geometry error: {exc}", 5000)
+                    geometry = None
+                if geometry is not None:
+                    groups = probe.groups or [
+                        ChannelGroup(f"probe{probe_index + 1}", list(range(probe.n_channels)))
+                    ]
+                    geometry_by_channel.update(
+                        geometry.positions_for_groups(groups, channel_offset=offset)
+                    )
+            offset += probe.n_channels
+        return geometry_by_channel
+
+    def _chanmap_channel_geometry(self) -> dict[int, ProbeSitePosition]:
+        if self._chanmap_geometry_path is not None:
+            try:
+                return load_chanmap_geometry(self._chanmap_geometry_path)
+            except ProbeGeometryError as exc:
+                self.statusBar().showMessage(f"Probe geometry: {exc}", 5000)
+                return {}
+        path_text = self.dat_path.text().strip()
+        if not path_text:
+            return {}
+        selected_path = Path(path_text)
+        dat_paths = self._active_recording_dat_paths()
+        basenames = self._analysis_basenames(selected_path, dat_paths)
+        base_dirs = candidate_analysis_dirs(selected_path, dat_paths)
+        chanmap_file = find_chanmap_file(base_dirs, basenames)
+        if chanmap_file is None:
+            self.statusBar().showMessage("Probe geometry: chanMap.mat not found", 4000)
+            return {}
+        try:
+            return load_chanmap_geometry(chanmap_file)
+        except ProbeGeometryError as exc:
+            self.statusBar().showMessage(f"Probe geometry: {exc}", 5000)
+            return {}
 
     def _channel_view_tab_changed(self, index: int) -> None:
         if self._is_channel_profile_tab_active():
