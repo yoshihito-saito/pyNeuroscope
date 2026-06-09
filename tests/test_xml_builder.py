@@ -44,6 +44,29 @@ def test_parses_demo_xml_when_present() -> None:
     assert 34 in bad
 
 
+def test_parses_buzsaki64l_probe2_local_xml() -> None:
+    path = Path("probe_xmls/ProbeMaps/Neuronexus/Buzsaki64L_probe2_local.xml")
+
+    metadata, groups, bad = parse_neurosuite_xml(path)
+    channels = [channel for group in groups for channel in group.channels]
+
+    assert metadata.n_channels == 64
+    assert metadata.sampling_rate == 20000
+    assert metadata.lfp_sampling_rate == 1250
+    assert [group.channels for group in groups] == [
+        [33, 38, 32, 39, 35, 36, 34, 37],
+        [41, 46, 40, 47, 43, 44, 42, 45],
+        [16, 25, 17, 24, 18, 22, 20, 21],
+        [26, 19, 28, 23, 29, 27, 30, 31],
+        [13, 4, 9, 2, 5, 3, 1, 0],
+        [7, 14, 6, 15, 8, 12, 11, 10],
+        [48, 55, 49, 54, 50, 53, 51, 52],
+        [56, 63, 57, 62, 58, 61, 59, 60],
+    ]
+    assert sorted(channels) == list(range(64))
+    assert bad == set()
+
+
 def test_includes_optional_acquisition_fields() -> None:
     metadata = RecordingMetadata(n_bits=16, voltage_range=20, amplification=1000, offset=0)
 

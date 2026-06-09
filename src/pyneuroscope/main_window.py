@@ -156,10 +156,10 @@ class MainWindow(QMainWindow):
         self.dat_path = QLineEdit()
         self.dat_path.setMinimumWidth(260)
         self.dat_path.setMaximumWidth(720)
-        self.dat_path.setPlaceholderText("Select .dat file, basepath, or session folder")
+        self.dat_path.setPlaceholderText("Select .dat/.lfp file, basepath, or session folder")
         browse_folder = QPushButton("Browse Folder")
         browse_folder.clicked.connect(self._browse_dat)
-        open_dat = QPushButton("Open single DAT")
+        open_dat = QPushButton("Open recording file")
         open_dat.clicked.connect(self._browse_dat_file)
         layout.addWidget(browse_folder)
         layout.addWidget(open_dat)
@@ -208,6 +208,9 @@ class MainWindow(QMainWindow):
         self.lfp_sampling_rate.setRange(1, 1000000)
         self.lfp_sampling_rate.setDecimals(3)
         self.lfp_sampling_rate.setValue(1250)
+        self.file_extra_channels = QSpinBox()
+        self.file_extra_channels.setRange(0, 4096)
+        self.file_extra_channels.setValue(0)
         self.total_n_channels_label = QLabel("4")
         self.duration_label = QLabel("-")
         self.start_minutes = QSpinBox()
@@ -250,6 +253,7 @@ class MainWindow(QMainWindow):
         form.addRow("Total nChannels", self.total_n_channels_label)
         form.addRow("samplingRate", self.sampling_rate)
         form.addRow("lfpSamplingRate", self.lfp_sampling_rate)
+        form.addRow("ADC channels in file", self.file_extra_channels)
         form.addRow("Duration", self.duration_label)
 
 
@@ -257,9 +261,11 @@ class MainWindow(QMainWindow):
             self.n_channels,
             self.sampling_rate,
             self.lfp_sampling_rate,
+            self.file_extra_channels,
         ]:
             widget.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.n_channels.valueChanged.connect(self._n_channels_changed)
+        self.file_extra_channels.valueChanged.connect(self._file_extra_channels_changed)
         for widget in [
             self.sampling_rate,
             self.lfp_sampling_rate,
@@ -510,6 +516,7 @@ class MainWindow(QMainWindow):
             n_channels=total,
             sampling_rate=self.sampling_rate.value(),
             lfp_sampling_rate=self.lfp_sampling_rate.value(),
+            file_extra_channels=self.file_extra_channels.value(),
         )
         self._set_total_n_channels(total)
         self.groups = groups
@@ -887,9 +894,9 @@ class MainWindow(QMainWindow):
     def _browse_dat_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Select .dat recording file",
+            "Select recording file",
             self._recording_dialog_start_path(),
-            "DAT files (*.dat);;All files (*)",
+            "Recording files (*.dat *.lfp);;DAT files (*.dat);;LFP files (*.lfp);;All files (*)",
         )
         if path:
             self.dat_path.setText(path)
@@ -902,8 +909,8 @@ class MainWindow(QMainWindow):
 
     def _resolve_recording_dat_paths(self, selected_path: Path) -> list[Path]:
         if selected_path.is_file():
-            if selected_path.suffix.lower() != ".dat":
-                raise DatReaderError(f"Expected a .dat file, got: {selected_path.name}")
+            if selected_path.suffix.lower() not in {".dat", ".lfp"}:
+                raise DatReaderError(f"Expected a .dat or .lfp file, got: {selected_path.name}")
             return [selected_path]
         if not selected_path.exists():
             raise DatReaderError(f"Path does not exist: {selected_path}")
@@ -935,6 +942,20 @@ class MainWindow(QMainWindow):
         if not matches:
             raise DatReaderError(f"No amplifier.dat, basename.dat, or continuous.dat found under: {selected_path}")
         return matches
+
+    def _recording_file_sampling_rate(self, path: Path | None = None) -> float:
+        if path is not None and path.suffix.lower() == ".lfp":
+            return self.lfp_sampling_rate.value()
+        paths = self._recording_dat_paths if path is None else []
+        if path is None:
+            if not paths:
+                paths = self._active_recording_dat_paths()
+            if paths and all(candidate.suffix.lower() == ".lfp" for candidate in paths):
+                return self.lfp_sampling_rate.value()
+        return self.sampling_rate.value()
+
+    def _recording_file_n_channels(self) -> int:
+        return self.n_channels.value() + self.file_extra_channels.value()
 
     def _find_open_ephys_continuous_dat_paths(self, selected_path: Path) -> list[Path]:
         matches: list[Path] = []
@@ -1015,8 +1036,8 @@ class MainWindow(QMainWindow):
             infos.append(
                 inspect_dat(
                     path,
-                    self.n_channels.value(),
-                    self.sampling_rate.value(),
+                    self._recording_file_n_channels(),
+                    self._recording_file_sampling_rate(path),
                     allow_trailing_bytes=True,
                 )
             )
@@ -1109,8 +1130,8 @@ class MainWindow(QMainWindow):
             try:
                 window = read_dat_window(
                     info.path,
-                    self.n_channels.value(),
-                    self.sampling_rate.value(),
+                    self._recording_file_n_channels(),
+                    self._recording_file_sampling_rate(info.path),
                     local_start,
                     local_duration,
                     allow_trailing_bytes=True,
@@ -1121,7 +1142,7 @@ class MainWindow(QMainWindow):
                 return None
             if window.time_seconds.size:
                 time_parts.append(window.time_seconds + offset)
-                data_parts.append(window.data)
+                data_parts.append(window.data[:, : self.n_channels.value()])
             remaining_duration -= local_duration
             remaining_start = 0.0
             offset += seg_duration
@@ -1155,7 +1176,7 @@ class MainWindow(QMainWindow):
         self._load_adjacent_spikes_and_events()
         if self._is_sleep_scoring_active():
             self._clear_sleep_state_context()
-            self.sleep_status.setText("DAT selected. Load an existing SleepState.states.mat file when needed.")
+            self.sleep_status.setText("Recording selected. Load an existing SleepState.states.mat file when needed.")
             self.sleep_outputs.setText("Outputs: -")
             self._refresh_duration()
             self._sync_time_scroll(self._current_recording_duration_seconds())
@@ -2103,6 +2124,25 @@ class MainWindow(QMainWindow):
             self._refresh_region_summary()
         self._refresh_all()
 
+    def _file_extra_channels_changed(self) -> None:
+        self.loaded_metadata = RecordingMetadata(
+            dat_path=self.loaded_metadata.dat_path,
+            n_channels=self.loaded_metadata.n_channels,
+            sampling_rate=self.loaded_metadata.sampling_rate,
+            lfp_sampling_rate=self.loaded_metadata.lfp_sampling_rate,
+            dtype=self.loaded_metadata.dtype,
+            n_bits=self.loaded_metadata.n_bits,
+            voltage_range=self.loaded_metadata.voltage_range,
+            amplification=self.loaded_metadata.amplification,
+            offset=self.loaded_metadata.offset,
+            least_significant_bit=self.loaded_metadata.least_significant_bit,
+            duration_seconds=self.loaded_metadata.duration_seconds,
+            total_frames=self.loaded_metadata.total_frames,
+            file_size_bytes=self.loaded_metadata.file_size_bytes,
+            file_extra_channels=self.file_extra_channels.value(),
+        )
+        self._refresh_all()
+
     def _use_default_linear_probe(self) -> None:
         if self._group_source == "manual":
             return
@@ -2118,6 +2158,7 @@ class MainWindow(QMainWindow):
             n_channels=n_channels,
             sampling_rate=self.sampling_rate.value(),
             lfp_sampling_rate=self.lfp_sampling_rate.value(),
+            file_extra_channels=self.file_extra_channels.value(),
         )
         self.probes = [ProbeConfig(n_channels)]
         self._refresh_probe_controls()
@@ -2366,12 +2407,12 @@ class MainWindow(QMainWindow):
         data = getattr(self, "_current_data", None)
         time = getattr(self, "_current_time", None)
         if data is None or time is None or np.asarray(data).ndim != 2 or np.asarray(data).size == 0:
-            QMessageBox.information(self, "Spectrogram", "Load a DAT window before opening the spectrogram.")
+            QMessageBox.information(self, "Spectrogram", "Load a recording window before opening the spectrogram.")
             return
         dialog = ChannelSpectrogramDialog(
             time,
             data,
-            sampling_rate=self.sampling_rate.value(),
+            sampling_rate=self._recording_file_sampling_rate(),
             window_start_seconds=self._window_start_seconds(),
             window_duration_seconds=self._window_duration_seconds(),
             total_duration_seconds=self._current_recording_duration_seconds(),
@@ -2452,7 +2493,7 @@ class MainWindow(QMainWindow):
             if self.bandpass_enabled.isChecked():
                 processed = bandpass_filter(
                     processed,
-                    self.sampling_rate.value(),
+                    self._recording_file_sampling_rate(),
                     self.bandpass_low.value(),
                     self.bandpass_high.value(),
                 )
@@ -2723,7 +2764,7 @@ class MainWindow(QMainWindow):
         self._update_stream_timer_interval()
 
     def _minimum_window_duration_seconds(self) -> float:
-        sampling_rate = self.sampling_rate.value() if hasattr(self, "sampling_rate") else 0.0
+        sampling_rate = self._recording_file_sampling_rate() if hasattr(self, "sampling_rate") else 0.0
         if sampling_rate > 0:
             return max(1e-6, 1.0 / float(sampling_rate))
         return 1e-6
@@ -3052,6 +3093,7 @@ class MainWindow(QMainWindow):
             duration_seconds=self.loaded_metadata.duration_seconds,
             total_frames=self.loaded_metadata.total_frames,
             file_size_bytes=self.loaded_metadata.file_size_bytes,
+            file_extra_channels=self.file_extra_channels.value(),
         )
 
     def _parse_bad_channels(self) -> set[int]:

@@ -58,7 +58,7 @@ class KeyEvent:
         return self._modifiers
 
 
-def test_top_bar_uses_folder_and_single_dat_buttons() -> None:
+def test_top_bar_uses_folder_and_recording_file_buttons() -> None:
     app = QApplication.instance() or QApplication([])
     _ = app
     window = MainWindow()
@@ -66,7 +66,7 @@ def test_top_bar_uses_folder_and_single_dat_buttons() -> None:
     button_labels = [button.text() for button in window.findChildren(QPushButton)]
 
     assert "Browse Folder" in button_labels
-    assert "Open single DAT" in button_labels
+    assert "Open recording file" in button_labels
     assert "Open" not in button_labels
 
 
@@ -132,7 +132,7 @@ def test_browse_folder_commits_selected_recording_path(monkeypatch: pytest.Monke
     assert committed_paths == [str(selected)]
 
 
-def test_open_single_dat_commits_selected_dat_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_open_single_recording_commits_selected_dat_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     app = QApplication.instance() or QApplication([])
     _ = app
     window = MainWindow()
@@ -141,7 +141,7 @@ def test_open_single_dat_commits_selected_dat_file(monkeypatch: pytest.MonkeyPat
     committed_paths: list[str] = []
     monkeypatch.setattr(
         "pyneuroscope.main_window.QFileDialog.getOpenFileName",
-        lambda *args, **kwargs: (str(selected), "DAT files (*.dat)"),
+        lambda *args, **kwargs: (str(selected), "Recording files (*.dat *.lfp)"),
     )
     monkeypatch.setattr(window, "_dat_path_committed", lambda: committed_paths.append(window.dat_path.text()))
 
@@ -660,6 +660,16 @@ def test_recording_discovery_accepts_explicit_dat_file(monkeypatch: pytest.Monke
     assert window._resolve_recording_dat_paths(selected) == [selected]
 
 
+def test_recording_discovery_accepts_explicit_lfp_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    window = MainWindow()
+    selected = Path("session") / "basename.lfp"
+    monkeypatch.setattr(Path, "is_file", lambda self: self == selected)
+
+    assert window._resolve_recording_dat_paths(selected) == [selected]
+
+
 def test_recording_discovery_uses_direct_basename_dat(tmp_path: Path) -> None:
     app = QApplication.instance() or QApplication([])
     _ = app
@@ -670,6 +680,67 @@ def test_recording_discovery_uses_direct_basename_dat(tmp_path: Path) -> None:
     basename_dat.write_bytes(b"\0" * 16)
 
     assert window._resolve_recording_dat_paths(selected) == [basename_dat]
+
+
+def test_recording_discovery_does_not_auto_load_lfp_from_folder(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    window = MainWindow()
+    selected = tmp_path / "session"
+    selected.mkdir()
+    basename_lfp = selected / "session.lfp"
+    basename_lfp.write_bytes(b"\0" * 16)
+
+    with pytest.raises(DatReaderError):
+        window._resolve_recording_dat_paths(selected)
+
+
+def test_lfp_file_uses_lfp_sampling_rate_for_duration(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    window = MainWindow()
+    selected = tmp_path / "basename.lfp"
+    selected.write_bytes(np.arange(8, dtype=np.int16).tobytes())
+    window.n_channels.setValue(2)
+    window.sampling_rate.setValue(1000)
+    window.lfp_sampling_rate.setValue(2)
+    window.dat_path.blockSignals(True)
+    window.dat_path.setText(str(selected))
+    window.dat_path.blockSignals(False)
+
+    info = window._recording_dat_infos()[0]
+
+    assert info.sampling_rate == 2
+    assert info.duration_seconds == pytest.approx(2.0)
+
+
+def test_extra_adc_channels_are_read_but_not_displayed(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    window = MainWindow()
+    selected = tmp_path / "continuous.dat"
+    data = np.asarray(
+        [
+            [10, 11, 900],
+            [20, 21, 901],
+        ],
+        dtype=np.int16,
+    )
+    data.tofile(selected)
+    window.n_channels.setValue(2)
+    window.file_extra_channels.setValue(1)
+    window.sampling_rate.setValue(1)
+    window.dat_path.blockSignals(True)
+    window.dat_path.setText(str(selected))
+    window.dat_path.blockSignals(False)
+
+    info = window._recording_dat_infos()[0]
+    time, display_data = window._read_recording_window_data(0.0, 2.0, silent=True)
+
+    assert info.n_channels == 3
+    assert info.total_frames == 2
+    assert time.tolist() == [0.0, 1.0]
+    assert display_data.tolist() == [[10, 11], [20, 21]]
 
 
 def test_recording_discovery_checks_only_one_folder_level(tmp_path: Path) -> None:

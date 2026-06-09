@@ -21,6 +21,7 @@ class RecordingMetadata:
     duration_seconds: float | None = None
     total_frames: int | None = None
     file_size_bytes: int | None = None
+    file_extra_channels: int = 0
 
     @property
     def path(self) -> Path | None:

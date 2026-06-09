@@ -35,7 +35,9 @@ def validate_settings(
 
     if recording.dat_path:
         try:
-            info = inspect_dat(recording.dat_path, recording.n_channels, recording.sampling_rate, recording.dtype)
+            file_sampling_rate = _recording_file_sampling_rate(recording)
+            file_n_channels = _recording_file_n_channels(recording)
+            info = inspect_dat(recording.dat_path, file_n_channels, file_sampling_rate, recording.dtype)
             try:
                 _, _, clipped = compute_window_bounds(
                     info.total_frames,
@@ -77,6 +79,17 @@ def validate_settings(
             messages.append(_error(f"XML validation failed: {exc}"))
 
     return ValidationResult(messages)
+
+
+def _recording_file_sampling_rate(recording: RecordingMetadata) -> float:
+    path = Path(recording.dat_path) if recording.dat_path else None
+    if path is not None and path.suffix.lower() == ".lfp":
+        return recording.lfp_sampling_rate
+    return recording.sampling_rate
+
+
+def _recording_file_n_channels(recording: RecordingMetadata) -> int:
+    return int(recording.n_channels) + max(0, int(recording.file_extra_channels))
 
 
 def _validate_groups(n_channels: int, groups: list[ChannelGroup]) -> list[ValidationMessage]:

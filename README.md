@@ -2,13 +2,15 @@
 
 pyNeuroscope is a Python desktop app inspired by NeuroScope for inspecting electrophysiology recordings, creating NeuroSuite compatible `amplifier.xml` files, and reviewing existing sleep-state annotations.
 
-It is designed for quick visual checks of `amplifier.dat`, channel grouping, bad-channel marking, color-map assignment, XML export, multi-subsession recordings, and manual editing of existing `SleepState.states.mat` results.
+It is designed for quick visual checks of `amplifier.dat`, explicitly selected `.lfp` files, channel grouping, bad-channel marking, color-map assignment, XML export, multi-subsession recordings, and manual editing of existing `SleepState.states.mat` results.
 
 ![pyNeuroscope screenshot](docs/pyneuroscope-screenshot.png)
 
 ## Features
 
 - Preview interleaved `int16` `amplifier.dat` recordings by time window.
+- Open `.lfp` files explicitly for LFP-rate inspection using `lfpSamplingRate`.
+- Set extra ADC channels present at the end of an Open Ephys `continuous.dat` frame so they are used for file reading but hidden from the trace display.
 - Switch between single-column and group-column trace views.
 - Scroll through time with the time bar or Left / Right keys.
 - Change the displayed time window with `Ctrl + mouse wheel` over the traces.
