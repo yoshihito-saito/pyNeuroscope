@@ -12,6 +12,7 @@ from pathlib import Path
 
 APP_NAME = "pyNeuroscope"
 ZIP_NAME = "pyNeuroscope-Windows.zip"
+INSTALL_DIR_MARKER = "__PYNEUROSCOPE_INSTALL_DIR__="
 
 
 def _bundle_dir() -> Path:
@@ -78,7 +79,7 @@ def _choose_install_parent(default_parent: Path) -> Path | None:
         $dialog.SelectedPath = {_quote_ps(default_parent)}
         $dialog.ShowNewFolderButton = $true
         if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
-            Write-Output $dialog.SelectedPath
+            Write-Output ({_quote_ps(INSTALL_DIR_MARKER)} + $dialog.SelectedPath)
             exit 0
         }}
         exit 2
@@ -95,10 +96,19 @@ def _choose_install_parent(default_parent: Path) -> Path | None:
         return None
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "Could not open the install folder picker.")
-    selected = result.stdout.strip()
+    selected = _parse_install_dir_output(result.stdout)
     if not selected:
         return None
     return Path(selected).expanduser()
+
+
+def _parse_install_dir_output(output: str) -> str | None:
+    for line in reversed(output.splitlines()):
+        clean = line.strip()
+        if clean.startswith(INSTALL_DIR_MARKER):
+            selected = clean[len(INSTALL_DIR_MARKER) :].strip()
+            return selected or None
+    return None
 
 
 def _install_paths(parent_or_root: Path) -> tuple[Path, Path]:
