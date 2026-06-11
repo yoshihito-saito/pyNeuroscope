@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import textwrap
 import zipfile
 from pathlib import Path
 
@@ -21,6 +22,10 @@ def _bundle_dir() -> Path:
 
 def _message(title: str, text: str) -> None:
     ctypes.windll.user32.MessageBoxW(None, text, title, 0x40)
+
+
+def _error_message(title: str, text: str) -> None:
+    ctypes.windll.user32.MessageBoxW(None, text, title, 0x10)
 
 
 def _desktop_dir() -> Path:
@@ -49,6 +54,75 @@ def _create_shortcut(target: Path, shortcut: Path) -> None:
     )
 
 
+def _default_install_parent() -> Path:
+    return Path(os.environ["LOCALAPPDATA"]) / "Programs"
+
+
+def _parse_install_parent(args: list[str]) -> Path | None:
+    for index, arg in enumerate(args):
+        if arg == "--install-dir" and index + 1 < len(args):
+            return Path(args[index + 1]).expanduser()
+        if arg.startswith("--install-dir="):
+            return Path(arg.split("=", 1)[1]).expanduser()
+    return None
+
+
+def _choose_install_parent(default_parent: Path) -> Path | None:
+    default_parent.mkdir(parents=True, exist_ok=True)
+    script = textwrap.dedent(
+        f"""
+        Add-Type -AssemblyName System.Windows.Forms
+        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+        $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+        $dialog.Description = "Select the folder where pyNeuroscope will be installed"
+        $dialog.SelectedPath = {_quote_ps(default_parent)}
+        $dialog.ShowNewFolderButton = $true
+        if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
+            Write-Output $dialog.SelectedPath
+            exit 0
+        }}
+        exit 2
+        """
+    ).strip()
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    if result.returncode == 2:
+        return None
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "Could not open the install folder picker.")
+    selected = result.stdout.strip()
+    if not selected:
+        return None
+    return Path(selected).expanduser()
+
+
+def _install_paths(parent_or_root: Path) -> tuple[Path, Path]:
+    selected = parent_or_root.resolve()
+    if selected.name.lower() == APP_NAME.lower():
+        return selected.parent, selected
+    return selected, selected / APP_NAME
+
+
+def _replace_install_tree(zip_path: Path, install_parent: Path, install_root: Path) -> None:
+    install_parent.mkdir(parents=True, exist_ok=True)
+    if install_root.exists():
+        try:
+            shutil.rmtree(install_root)
+        except PermissionError as exc:
+            raise PermissionError(
+                f"Could not replace the existing install folder:\n{install_root}\n\n"
+                "Close pyNeuroscope and any Explorer windows showing that folder, "
+                "then run the installer again or choose a different install location."
+            ) from exc
+    with zipfile.ZipFile(zip_path, "r") as archive:
+        archive.extractall(install_parent)
+
+
 def main() -> int:
     quiet = "--quiet" in sys.argv
     zip_path = _bundle_dir() / ZIP_NAME
@@ -57,19 +131,29 @@ def main() -> int:
             _message(APP_NAME, f"Installer payload was not found:\n{zip_path}")
         return 1
 
-    install_parent = Path(os.environ["LOCALAPPDATA"]) / "Programs"
-    install_root = install_parent / APP_NAME
+    try:
+        selected_install = _parse_install_parent(sys.argv[1:])
+        if selected_install is None:
+            selected_install = _default_install_parent() if quiet else _choose_install_parent(_default_install_parent())
+        if selected_install is None:
+            return 0
+        install_parent, install_root = _install_paths(selected_install)
+    except Exception as exc:
+        if not quiet:
+            _error_message(APP_NAME, str(exc))
+        return 1
     exe_path = install_root / "pyNeuroscope.exe"
 
-    install_parent.mkdir(parents=True, exist_ok=True)
-    if install_root.exists():
-        shutil.rmtree(install_root)
-    with zipfile.ZipFile(zip_path, "r") as archive:
-        archive.extractall(install_parent)
+    try:
+        _replace_install_tree(zip_path, install_parent, install_root)
+    except Exception as exc:
+        if not quiet:
+            _error_message(APP_NAME, str(exc))
+        return 1
 
     if not exe_path.exists():
         if not quiet:
-            _message(APP_NAME, f"Installed executable was not found:\n{exe_path}")
+            _error_message(APP_NAME, f"Installed executable was not found:\n{exe_path}")
         return 1
 
     shortcut_path = _desktop_dir() / "pyNeuroscope.lnk"
