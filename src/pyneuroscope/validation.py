@@ -37,19 +37,29 @@ def validate_settings(
         try:
             file_sampling_rate = _recording_file_sampling_rate(recording)
             file_n_channels = _recording_file_n_channels(recording)
-            info = inspect_dat(recording.dat_path, file_n_channels, file_sampling_rate, recording.dtype)
-            try:
-                _, _, clipped = compute_window_bounds(
+            info = inspect_dat(
+                recording.dat_path,
+                file_n_channels,
+                file_sampling_rate,
+                recording.dtype,
+                allow_trailing_bytes=True,
+            )
+            trailing_bytes = info.file_size_bytes % info.frame_bytes
+            if trailing_bytes:
+                messages.append(
+                    _warning(
+                        f"Recording file has {trailing_bytes} trailing bytes that do not make a complete frame"
+                    )
+                )
+            messages.extend(
+                _validate_selected_window(
+                    recording.duration_seconds,
                     info.total_frames,
                     info.sampling_rate,
                     selected_window_start_seconds,
                     selected_window_duration_seconds,
-                    clip=True,
                 )
-                if clipped:
-                    messages.append(_warning("Selected window was clipped to recording duration"))
-            except DatReaderError as exc:
-                messages.append(_error(str(exc)))
+            )
         except DatReaderError as exc:
             messages.append(_error(str(exc)))
     elif recording.dat_path is not None:
@@ -90,6 +100,45 @@ def _recording_file_sampling_rate(recording: RecordingMetadata) -> float:
 
 def _recording_file_n_channels(recording: RecordingMetadata) -> int:
     return int(recording.n_channels) + max(0, int(recording.file_extra_channels))
+
+
+def _validate_selected_window(
+    duration_seconds: float | None,
+    total_frames: int,
+    sampling_rate: float,
+    start_seconds: float,
+    window_duration_seconds: float,
+) -> list[ValidationMessage]:
+    messages: list[ValidationMessage] = []
+    if duration_seconds is not None:
+        if duration_seconds <= 0:
+            messages.append(_error("Recording duration must be positive"))
+            return messages
+        if start_seconds < 0:
+            messages.append(_error("start_seconds must be non-negative"))
+            return messages
+        if window_duration_seconds <= 0:
+            messages.append(_error("duration_seconds must be positive"))
+            return messages
+        if start_seconds >= duration_seconds:
+            messages.append(_error("start_seconds is outside the recording"))
+        elif start_seconds + window_duration_seconds > duration_seconds:
+            messages.append(_warning("Selected window was clipped to recording duration"))
+        return messages
+
+    try:
+        _, _, clipped = compute_window_bounds(
+            total_frames,
+            sampling_rate,
+            start_seconds,
+            window_duration_seconds,
+            clip=True,
+        )
+        if clipped:
+            messages.append(_warning("Selected window was clipped to recording duration"))
+    except DatReaderError as exc:
+        messages.append(_error(str(exc)))
+    return messages
 
 
 def _validate_groups(n_channels: int, groups: list[ChannelGroup]) -> list[ValidationMessage]:

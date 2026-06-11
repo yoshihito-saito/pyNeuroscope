@@ -988,6 +988,7 @@ class MainWindow(QMainWindow):
                 if child.name.lower() in skip_names:
                     continue
                 stack.append((child, depth + 1))
+        matches = self._filter_open_ephys_primary_streams(matches)
         unique: list[Path] = []
         seen: set[str] = set()
         for path in sorted(matches, key=self._recording_session_sort_key):
@@ -996,6 +997,33 @@ class MainWindow(QMainWindow):
                 seen.add(key)
                 unique.append(path)
         return unique
+
+    def _filter_open_ephys_primary_streams(self, paths: list[Path]) -> list[Path]:
+        if len(paths) <= 1:
+            return paths
+        grouped: dict[Path, list[Path]] = {}
+        for path in paths:
+            grouped.setdefault(self._open_ephys_recording_key(path), []).append(path)
+        return [self._best_open_ephys_stream(candidates) for candidates in grouped.values()]
+
+    def _open_ephys_recording_key(self, path: Path) -> Path:
+        for parent in path.parents:
+            if parent.name.lower() == "continuous":
+                return parent.parent
+        return path.parent
+
+    def _best_open_ephys_stream(self, paths: list[Path]) -> Path:
+        return max(paths, key=self._open_ephys_stream_score)
+
+    def _open_ephys_stream_score(self, path: Path) -> tuple[int, int, str]:
+        stream_name = path.parent.name.lower()
+        auxiliary_tokens = ("adc", "analog", "aux", "digital", "event", "ttl")
+        primary = 0 if any(token in stream_name for token in auxiliary_tokens) else 1
+        try:
+            file_size = int(path.stat().st_size)
+        except OSError:
+            file_size = 0
+        return primary, file_size, str(path).lower()
 
     def _recording_session_sort_key(self, path: Path) -> tuple:
         timestamp = self._extract_recording_folder_timestamp(path)
@@ -1322,10 +1350,24 @@ class MainWindow(QMainWindow):
             else:
                 candidates.append(selected_path.with_suffix(".xml"))
         candidates.append(dat_path.with_suffix(".xml"))
+        candidates.extend(self._open_ephys_ancestor_xml_candidates(dat_path))
         for candidate in candidates:
             if candidate.exists():
                 return candidate
         return None
+
+    def _open_ephys_ancestor_xml_candidates(self, dat_path: Path) -> list[Path]:
+        if dat_path.name.lower() != "continuous.dat":
+            return []
+        candidates: list[Path] = []
+        seen: set[str] = set()
+        for parent in dat_path.parents:
+            for candidate in [parent / f"{parent.name}.xml", parent / "amplifier.xml"]:
+                key = str(candidate)
+                if key not in seen:
+                    seen.add(key)
+                    candidates.append(candidate)
+        return candidates
 
     def _apply_xml_metadata(self, path: Path, *, show_status: bool = False) -> None:
         try:
@@ -3079,6 +3121,7 @@ class MainWindow(QMainWindow):
     def _metadata(self) -> RecordingMetadata:
         paths = self._active_recording_dat_paths()
         path = str(paths[0]) if paths else None
+        duration_seconds = self._metadata_duration_seconds()
         return RecordingMetadata(
             dat_path=path,
             n_channels=self.n_channels.value(),
@@ -3090,11 +3133,20 @@ class MainWindow(QMainWindow):
             amplification=self.loaded_metadata.amplification,
             offset=self.loaded_metadata.offset,
             least_significant_bit=self.loaded_metadata.least_significant_bit,
-            duration_seconds=self.loaded_metadata.duration_seconds,
+            duration_seconds=duration_seconds,
             total_frames=self.loaded_metadata.total_frames,
             file_size_bytes=self.loaded_metadata.file_size_bytes,
             file_extra_channels=self.file_extra_channels.value(),
         )
+
+    def _metadata_duration_seconds(self) -> float | None:
+        paths = self._active_recording_dat_paths()
+        if not paths:
+            return self.loaded_metadata.duration_seconds
+        try:
+            return sum(info.duration_seconds for info in self._recording_dat_infos())
+        except DatReaderError:
+            return self.loaded_metadata.duration_seconds
 
     def _parse_bad_channels(self) -> set[int]:
         text = self.bad_channels_text.text().strip()

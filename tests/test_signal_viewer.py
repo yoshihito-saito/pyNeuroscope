@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QApplication
 
 from pyneuroscope.models import SignalSpikeOverlay
 from pyneuroscope.signal_layout import TraceLayoutItem
-from pyneuroscope.signal_viewer import SignalViewer, _csd_depths
+from pyneuroscope.signal_viewer import SignalViewer, _csd_depths, _normalized_time_fractions
 
 
 def test_group_column_x_selection_uses_drag_start_column() -> None:
@@ -188,6 +188,15 @@ def test_csd_segments_drop_runs_shorter_than_three_channels() -> None:
     segments = viewer._csd_valid_segments(items)
 
     assert [[item.channel for item in segment] for segment in segments] == [[3, 4, 5]]
+
+
+def test_trace_x_fractions_use_actual_time_spacing() -> None:
+    fractions = _normalized_time_fractions(
+        np.asarray([0.0, 0.1, 1.0]),
+        np.asarray([0.0, 0.1, 1.0]),
+    )
+
+    assert fractions.tolist() == [0.0, 0.1, 1.0]
 
 
 def test_csd_depths_use_geometry_y_when_strictly_ordered() -> None:

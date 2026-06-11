@@ -781,6 +781,24 @@ def test_recording_discovery_prefers_open_ephys_continuous_dat_over_basename_dat
     assert window._resolve_recording_dat_paths(tmp_path) == [first_dat, second_dat]
 
 
+def test_recording_discovery_uses_one_open_ephys_stream_per_recording(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    window = MainWindow()
+    selected = tmp_path / "day17"
+    recording = selected / "2026-05-20_12-00-00" / "Record Node 101" / "experiment1" / "recording1" / "continuous"
+    neural_stream = recording / "Acquisition_Board-102.acquisition_board"
+    adc_stream = recording / "ADC-100.adc"
+    neural_stream.mkdir(parents=True)
+    adc_stream.mkdir(parents=True)
+    neural_dat = neural_stream / "continuous.dat"
+    adc_dat = adc_stream / "continuous.dat"
+    neural_dat.write_bytes(b"\0" * 400)
+    adc_dat.write_bytes(b"\0" * 16)
+
+    assert window._resolve_recording_dat_paths(selected) == [neural_dat]
+
+
 def test_adjacent_xml_prefers_selected_folder_basename_xml_for_open_ephys(tmp_path: Path) -> None:
     app = QApplication.instance() or QApplication([])
     _ = app
@@ -796,6 +814,24 @@ def test_adjacent_xml_prefers_selected_folder_basename_xml_for_open_ephys(tmp_pa
     continuous_xml.write_text("<parameters />", encoding="utf-8")
     window.dat_path.blockSignals(True)
     window.dat_path.setText(str(selected))
+    window.dat_path.blockSignals(False)
+
+    assert window._resolve_adjacent_xml_path(dat_path) == base_xml
+
+
+def test_adjacent_xml_finds_basepath_xml_for_direct_open_ephys_file(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    window = MainWindow()
+    selected = tmp_path / "day17"
+    dat_folder = selected / "2026-05-20_12-32-59" / "Record Node 101" / "experiment1" / "recording1" / "continuous" / "Acquisition_Board-102.acquisition_board"
+    dat_folder.mkdir(parents=True)
+    dat_path = dat_folder / "continuous.dat"
+    dat_path.write_bytes(b"\0" * 16)
+    base_xml = selected / "day17.xml"
+    base_xml.write_text("<parameters />", encoding="utf-8")
+    window.dat_path.blockSignals(True)
+    window.dat_path.setText(str(dat_path))
     window.dat_path.blockSignals(False)
 
     assert window._resolve_adjacent_xml_path(dat_path) == base_xml

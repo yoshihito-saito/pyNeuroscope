@@ -156,7 +156,8 @@ class SignalViewer(QWidget):
         csd_data = self._csd_display_data(visible_data, visible_time, max_points)
         step = max(1, visible_data.shape[0] // max_points)
         sampled_data = visible_data[::step]
-        x_values = np.linspace(0, 1, sampled_data.shape[0], dtype=np.float64)
+        sampled_time = visible_time[::step]
+        x_values = _normalized_time_fractions(sampled_time, visible_time)
         item_geometries: dict[int, tuple[float, float, float, float, float, float]] = {}
 
         if self._show_csd and csd_data.shape[0] >= 2:
@@ -989,6 +990,22 @@ def _samples_at_times(time: np.ndarray, trace: np.ndarray, times: np.ndarray) ->
     choose_previous = np.abs(time[previous] - times) < np.abs(time[indices] - times)
     indices = np.where(choose_previous, previous, indices)
     return trace[indices].astype(float)
+
+
+def _normalized_time_fractions(time: np.ndarray, visible_time: np.ndarray) -> np.ndarray:
+    time = np.asarray(time, dtype=np.float64).reshape(-1)
+    visible_time = np.asarray(visible_time, dtype=np.float64).reshape(-1)
+    if time.size == 0:
+        return np.asarray([], dtype=np.float64)
+    if visible_time.size < 2:
+        return np.linspace(0.0, 1.0, time.size, dtype=np.float64)
+    start = float(visible_time[0])
+    end = float(visible_time[-1])
+    span = end - start
+    if not np.isfinite(span) or span <= 0:
+        return np.linspace(0.0, 1.0, time.size, dtype=np.float64)
+    values = (time - start) / span
+    return np.clip(values, 0.0, 1.0)
 
 
 def _csd_depths(ordered: Sequence[TraceLayoutItem]) -> list[float] | None:

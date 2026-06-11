@@ -88,3 +88,46 @@ def test_validation_uses_extra_file_channels_for_raw_frame_width(tmp_path: Path)
     )
 
     assert result.ok
+
+
+def test_validation_warns_but_allows_trailing_partial_frame(tmp_path: Path) -> None:
+    path = tmp_path / "continuous.dat"
+    np.asarray([[1, 2, 100], [3, 4, 101]], dtype=np.int16).tofile(path)
+    with path.open("ab") as handle:
+        handle.write(np.asarray([999], dtype=np.int16).tobytes())
+
+    result = validate_settings(
+        RecordingMetadata(
+            dat_path=str(path),
+            n_channels=2,
+            sampling_rate=1,
+            lfp_sampling_rate=1,
+            file_extra_channels=1,
+        ),
+        [ChannelGroup("g1", [0, 1])],
+        selected_window_start_seconds=1.0,
+        selected_window_duration_seconds=1.0,
+    )
+
+    assert result.ok
+    assert any("trailing bytes" in warning for warning in result.warnings)
+
+
+def test_validation_uses_recording_duration_for_concatenated_sessions(tmp_path: Path) -> None:
+    path = tmp_path / "first.dat"
+    np.asarray([[1, 2], [3, 4]], dtype=np.int16).tofile(path)
+
+    result = validate_settings(
+        RecordingMetadata(
+            dat_path=str(path),
+            n_channels=2,
+            sampling_rate=1,
+            lfp_sampling_rate=1,
+            duration_seconds=10.0,
+        ),
+        [ChannelGroup("g1", [0, 1])],
+        selected_window_start_seconds=3.0,
+        selected_window_duration_seconds=1.0,
+    )
+
+    assert result.ok
