@@ -13,6 +13,10 @@ from .models import SignalEventOverlay, SignalSpikeOverlay
 from .signal_layout import TraceLayoutItem
 
 
+TRACE_DISPLAY_SAMPLES_PER_PIXEL_SINGLE_COLUMN = 0.5
+TRACE_DISPLAY_SAMPLES_PER_PIXEL_MULTI_COLUMN = 2.0
+
+
 class SignalViewer(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -149,7 +153,7 @@ class SignalViewer(QWidget):
             painter.drawLine(int(x0 + label_gutter), margin_top, int(x0 + label_gutter), height - margin_bottom)
 
         trace_width = max(8.0, column_width - label_gutter - 8)
-        max_points = max(2, int(trace_width / 2))
+        max_points = self._trace_display_max_points(trace_width, columns=columns)
         start_index, end_index = self._visible_sample_bounds(data.shape[0])
         visible_data = data[start_index:end_index]
         visible_time = self._time_seconds[start_index:end_index]
@@ -158,6 +162,7 @@ class SignalViewer(QWidget):
         sampled_data = visible_data[::step]
         sampled_time = visible_time[::step]
         x_values = _normalized_time_fractions(sampled_time, visible_time)
+        trace_pen_width = self._trace_pen_width(visible_time, trace_width, columns=columns)
         item_geometries: dict[int, tuple[float, float, float, float, float, float]] = {}
 
         if self._show_csd and csd_data.shape[0] >= 2:
@@ -213,7 +218,7 @@ class SignalViewer(QWidget):
                 path.lineTo(QPointF(x, y))
 
             pen = QPen(QColor("#5f6670") if item.is_bad else QColor(item.color))
-            pen.setWidthF(1.1)
+            pen.setWidthF(trace_pen_width)
             painter.setPen(pen)
             painter.drawPath(path)
             if self._show_channel_labels and trace_height >= 5.0 and label_gutter >= 28:
@@ -355,6 +360,32 @@ class SignalViewer(QWidget):
                 step = max(step, int(np.ceil((sampling_rate / target_hz) - 1e-9)))
         step = max(step, visible_data.shape[0] // max(2, max_points * 2))
         return visible_data[::step]
+
+    def _trace_display_max_points(self, trace_width: float, *, columns: int = 1) -> int:
+        samples_per_pixel = (
+            TRACE_DISPLAY_SAMPLES_PER_PIXEL_SINGLE_COLUMN
+            if int(columns) <= 1
+            else TRACE_DISPLAY_SAMPLES_PER_PIXEL_MULTI_COLUMN
+        )
+        return max(2, int(max(1.0, float(trace_width)) * samples_per_pixel))
+
+    def _trace_pen_width(self, visible_time: np.ndarray, trace_width: float, *, columns: int = 1) -> float:
+        time = np.asarray(visible_time, dtype=np.float64).reshape(-1)
+        width = max(1.0, float(trace_width))
+        if time.size < 2:
+            return 1.1
+        dt = float(np.nanmedian(np.diff(time)))
+        span = float(time[-1] - time[0])
+        if not np.isfinite(dt) or dt <= 0 or not np.isfinite(span) or span <= 0:
+            return 1.1
+        samples_per_pixel = max(1e-9, (span / dt) / width)
+        zoom_detail = max(1.0, 8.0 / samples_per_pixel)
+        scale_bonus = 0.0
+        max_width = 1.95
+        if int(columns) > 1:
+            scale_bonus = 0.18 * np.log2(max(1.0, self._vertical_scale))
+            max_width = 2.35
+        return min(max_width, 1.1 + 0.18 * np.log2(zoom_detail) + scale_bonus)
 
     def _draw_csd_background(
         self,

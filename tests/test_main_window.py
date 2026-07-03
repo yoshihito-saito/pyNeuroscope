@@ -714,6 +714,39 @@ def test_lfp_file_uses_lfp_sampling_rate_for_duration(tmp_path: Path) -> None:
     assert info.duration_seconds == pytest.approx(2.0)
 
 
+def test_recording_dtype_selection_controls_dat_inspection_and_reading(tmp_path: Path) -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    window = MainWindow()
+    selected = tmp_path / "float_recording.dat"
+    data = np.asarray(
+        [
+            [0.5, 1.5],
+            [2.5, 3.5],
+            [4.5, 5.5],
+            [6.5, 7.5],
+        ],
+        dtype=np.float32,
+    )
+    data.tofile(selected)
+    window.n_channels.setValue(2)
+    window.sampling_rate.setValue(2)
+    window.data_dtype.setCurrentText("float32")
+    window.dat_path.blockSignals(True)
+    window.dat_path.setText(str(selected))
+    window.dat_path.blockSignals(False)
+
+    info = window._recording_dat_infos()[0]
+    time, display_data = window._read_recording_window_data(0.0, 2.0, silent=True)
+
+    assert info.dtype == "float32"
+    assert info.total_frames == 4
+    assert info.duration_seconds == pytest.approx(2.0)
+    assert time.tolist() == [0.0, 0.5, 1.0, 1.5]
+    assert display_data.dtype == np.float32
+    assert display_data.tolist() == data.tolist()
+
+
 def test_extra_adc_channels_are_read_but_not_displayed(tmp_path: Path) -> None:
     app = QApplication.instance() or QApplication([])
     _ = app

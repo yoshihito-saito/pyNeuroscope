@@ -199,6 +199,47 @@ def test_trace_x_fractions_use_actual_time_spacing() -> None:
     assert fractions.tolist() == [0.0, 0.1, 1.0]
 
 
+def test_trace_display_keeps_half_sample_per_pixel_for_single_column() -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    viewer = SignalViewer()
+
+    assert viewer._trace_display_max_points(300.0, columns=1) == 150
+
+
+def test_trace_display_keeps_two_samples_per_pixel_for_multi_column() -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    viewer = SignalViewer()
+
+    assert viewer._trace_display_max_points(300.0, columns=2) == 600
+
+
+def test_trace_pen_width_increases_as_time_axis_zooms_in() -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    viewer = SignalViewer()
+    full_window = np.arange(0.0, 1.0, 1.0 / 20000.0)
+    zoomed_window = np.arange(0.0, 0.05, 1.0 / 20000.0)
+
+    assert viewer._trace_pen_width(zoomed_window, 500.0) > viewer._trace_pen_width(full_window, 500.0)
+
+
+def test_trace_pen_width_responds_to_scale_only_for_multi_column() -> None:
+    app = QApplication.instance() or QApplication([])
+    _ = app
+    viewer = SignalViewer()
+    time = np.arange(0.0, 0.2, 1.0 / 20000.0)
+
+    viewer._vertical_scale = 1.0
+    single_base = viewer._trace_pen_width(time, 300.0, columns=1)
+    multi_base = viewer._trace_pen_width(time, 300.0, columns=2)
+    viewer._vertical_scale = 2.0
+
+    assert viewer._trace_pen_width(time, 300.0, columns=1) == single_base
+    assert viewer._trace_pen_width(time, 300.0, columns=2) > multi_base
+
+
 def test_csd_depths_use_geometry_y_when_strictly_ordered() -> None:
     items = [
         TraceLayoutItem(0, 0, 0, 0, "#ffffff", False, y=-60.0),

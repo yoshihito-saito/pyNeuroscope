@@ -208,6 +208,9 @@ class MainWindow(QMainWindow):
         self.lfp_sampling_rate.setRange(1, 1000000)
         self.lfp_sampling_rate.setDecimals(3)
         self.lfp_sampling_rate.setValue(1250)
+        self.data_dtype = QComboBox()
+        self.data_dtype.addItems(["int16", "uint16", "int32", "uint32", "int8", "uint8", "float32", "float64"])
+        self.data_dtype.setCurrentText("int16")
         self.file_extra_channels = QSpinBox()
         self.file_extra_channels.setRange(0, 4096)
         self.file_extra_channels.setValue(0)
@@ -253,6 +256,7 @@ class MainWindow(QMainWindow):
         form.addRow("Total nChannels", self.total_n_channels_label)
         form.addRow("samplingRate", self.sampling_rate)
         form.addRow("lfpSamplingRate", self.lfp_sampling_rate)
+        form.addRow("Data type", self.data_dtype)
         form.addRow("ADC channels in file", self.file_extra_channels)
         form.addRow("Duration", self.duration_label)
 
@@ -266,6 +270,7 @@ class MainWindow(QMainWindow):
             widget.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.n_channels.valueChanged.connect(self._n_channels_changed)
         self.file_extra_channels.valueChanged.connect(self._file_extra_channels_changed)
+        self.data_dtype.currentTextChanged.connect(self._recording_dtype_changed)
         for widget in [
             self.sampling_rate,
             self.lfp_sampling_rate,
@@ -516,6 +521,7 @@ class MainWindow(QMainWindow):
             n_channels=total,
             sampling_rate=self.sampling_rate.value(),
             lfp_sampling_rate=self.lfp_sampling_rate.value(),
+            dtype=self._recording_file_dtype(),
             file_extra_channels=self.file_extra_channels.value(),
         )
         self._set_total_n_channels(total)
@@ -957,6 +963,11 @@ class MainWindow(QMainWindow):
     def _recording_file_n_channels(self) -> int:
         return self.n_channels.value() + self.file_extra_channels.value()
 
+    def _recording_file_dtype(self) -> str:
+        if hasattr(self, "data_dtype"):
+            return self.data_dtype.currentText()
+        return self.loaded_metadata.dtype or "int16"
+
     def _find_open_ephys_continuous_dat_paths(self, selected_path: Path) -> list[Path]:
         matches: list[Path] = []
         stack: list[tuple[Path, int]] = [(selected_path, 0)]
@@ -1066,6 +1077,7 @@ class MainWindow(QMainWindow):
                     path,
                     self._recording_file_n_channels(),
                     self._recording_file_sampling_rate(path),
+                    self._recording_file_dtype(),
                     allow_trailing_bytes=True,
                 )
             )
@@ -1162,6 +1174,7 @@ class MainWindow(QMainWindow):
                     self._recording_file_sampling_rate(info.path),
                     local_start,
                     local_duration,
+                    self._recording_file_dtype(),
                     allow_trailing_bytes=True,
                 )
             except (DatReaderError, OSError) as exc:
@@ -2172,7 +2185,26 @@ class MainWindow(QMainWindow):
             n_channels=self.loaded_metadata.n_channels,
             sampling_rate=self.loaded_metadata.sampling_rate,
             lfp_sampling_rate=self.loaded_metadata.lfp_sampling_rate,
-            dtype=self.loaded_metadata.dtype,
+            dtype=self._recording_file_dtype(),
+            n_bits=self.loaded_metadata.n_bits,
+            voltage_range=self.loaded_metadata.voltage_range,
+            amplification=self.loaded_metadata.amplification,
+            offset=self.loaded_metadata.offset,
+            least_significant_bit=self.loaded_metadata.least_significant_bit,
+            duration_seconds=self.loaded_metadata.duration_seconds,
+            total_frames=self.loaded_metadata.total_frames,
+            file_size_bytes=self.loaded_metadata.file_size_bytes,
+            file_extra_channels=self.file_extra_channels.value(),
+        )
+        self._refresh_all()
+
+    def _recording_dtype_changed(self) -> None:
+        self.loaded_metadata = RecordingMetadata(
+            dat_path=self.loaded_metadata.dat_path,
+            n_channels=self.loaded_metadata.n_channels,
+            sampling_rate=self.loaded_metadata.sampling_rate,
+            lfp_sampling_rate=self.loaded_metadata.lfp_sampling_rate,
+            dtype=self._recording_file_dtype(),
             n_bits=self.loaded_metadata.n_bits,
             voltage_range=self.loaded_metadata.voltage_range,
             amplification=self.loaded_metadata.amplification,
@@ -2200,6 +2232,7 @@ class MainWindow(QMainWindow):
             n_channels=n_channels,
             sampling_rate=self.sampling_rate.value(),
             lfp_sampling_rate=self.lfp_sampling_rate.value(),
+            dtype=self._recording_file_dtype(),
             file_extra_channels=self.file_extra_channels.value(),
         )
         self.probes = [ProbeConfig(n_channels)]
@@ -3127,7 +3160,7 @@ class MainWindow(QMainWindow):
             n_channels=self.n_channels.value(),
             sampling_rate=self.sampling_rate.value(),
             lfp_sampling_rate=self.lfp_sampling_rate.value(),
-            dtype=self.loaded_metadata.dtype,
+            dtype=self._recording_file_dtype(),
             n_bits=self.loaded_metadata.n_bits,
             voltage_range=self.loaded_metadata.voltage_range,
             amplification=self.loaded_metadata.amplification,
