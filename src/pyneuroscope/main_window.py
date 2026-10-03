@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QLineEdit,
     QMainWindow,
     QMessageBox,
@@ -27,10 +28,10 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QScrollBar,
     QSpinBox,
+    QSizePolicy,
     QStackedWidget,
     QSplitter,
     QTabWidget,
-    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -60,7 +61,6 @@ from .probe_geometry import (
     load_chanmap_geometry,
     load_probe_geometry,
     load_recording_channel_map,
-    selected_site_map,
     RecordingChannelMap,
     parse_recording_channel_map,
 )
@@ -191,11 +191,16 @@ class MainWindow(QMainWindow):
         self.left_tabs.tabBar().setExpanding(False)
         self.left_tabs.tabBar().setStyleSheet("QTabBar::tab { padding: 5px 8px; font-size: 12px; }")
         self.recording_tab = self._build_recording_tab()
+        self.recording_scroll = QScrollArea()
+        self.recording_scroll.setWidgetResizable(True)
+        self.recording_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.recording_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.recording_scroll.setWidget(self.recording_tab)
         self.spikes_tab = self._build_spikes_tab()
         self.events_tab = self._build_events_tab()
         self.analysis_tab = self._build_analysis_tab()
         self.sleep_tab = self._build_sleep_scoring_tab()
-        self.left_tabs.addTab(self.recording_tab, "Recording")
+        self.left_tabs.addTab(self.recording_scroll, "Recording")
         self.left_tabs.addTab(self.spikes_tab, "Spikes")
         self.left_tabs.addTab(self.events_tab, "Events")
         self.left_tabs.addTab(self.analysis_tab, "Analysis")
@@ -207,6 +212,7 @@ class MainWindow(QMainWindow):
     def _build_recording_tab(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
+        layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         form = QFormLayout()
 
         self.n_channels = QSpinBox()
@@ -376,6 +382,7 @@ class MainWindow(QMainWindow):
         header.addWidget(add_probe)
         self.probe_rows = QWidget()
         self.probe_rows_layout = QVBoxLayout(self.probe_rows)
+        self.probe_rows_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
         self.probe_rows_layout.setContentsMargins(0, 0, 0, 0)
         self.probe_rows_layout.setSpacing(6)
         layout.addLayout(header)
@@ -390,10 +397,13 @@ class MainWindow(QMainWindow):
             item = self.probe_rows_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.hide()
                 widget.deleteLater()
         for index, probe in enumerate(self.probes):
             row_panel = QWidget()
+            row_panel.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
             row_layout = QVBoxLayout(row_panel)
+            row_layout.setSizeConstraint(QLayout.SizeConstraint.SetMinimumSize)
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(3)
             title_row = QHBoxLayout()
@@ -440,10 +450,13 @@ class MainWindow(QMainWindow):
             probe_type.currentTextChanged.connect(probe_type.setToolTip)
             controls.addWidget(QLabel("nChannels"))
             controls.addWidget(channels)
-            controls.addWidget(QLabel("type"))
-            controls.addWidget(probe_type, 1)
+            controls.addStretch(1)
+            type_row = QHBoxLayout()
+            type_row.addWidget(QLabel("type"))
+            type_row.addWidget(probe_type, 1)
             row_layout.addLayout(title_row)
             row_layout.addLayout(controls)
+            row_layout.addLayout(type_row)
             map_row = QHBoxLayout()
             load_map = QPushButton("Recording map")
             load_map.setToolTip("Load this probe's Neuropixels metadata JSON, IMRO, or MAT/JSON channel map")
@@ -451,9 +464,6 @@ class MainWindow(QMainWindow):
             map_row.addWidget(load_map)
             geometry = load_probe_geometry(probe.probe_type) if probe.probe_type else None
             if geometry is not None and geometry.physical_sites:
-                select_sites = QPushButton("Active site IDs")
-                select_sites.clicked.connect(lambda checked=False, probe_index=index: self._edit_active_sites(probe_index))
-                map_row.addWidget(select_sites)
                 state = f"{len(probe.channel_map.active_channels)} active" if probe.channel_map is not None else "active map not set"
                 suffix = "; tip offset provisional" if "provisional" in geometry.note.lower() else ""
                 note = QLabel(f"{len(geometry.physical_sites)} sites; {state}{suffix}")
@@ -586,6 +596,31 @@ class MainWindow(QMainWindow):
         if sum(p.n_channels for i, p in enumerate(self.probes) if i != index) + candidate.n_channels > self.n_channels.maximum():
             raise ProbeGeometryError(f"Total nChannels exceeds {self.n_channels.maximum()}")
         self._validate_probe_mapping(candidate, mapping)
+        geometry = load_probe_geometry(candidate.probe_type) if candidate.probe_type else None
+        base_up = bool(geometry is not None and geometry.physical_sites)
+        def key(channel):
+            position = mapping.positions.get(channel)
+            if position is None:
+                return (1, 0, 0)
+            return (0, -position.y if base_up else position.y, position.x)
+        if count_changed:
+            candidate.groups = [ChannelGroup("group1", sorted(range(candidate.n_channels), key=key))]
+        else:
+            offset = sum(p.n_channels for p in self.probes[:index])
+            ordered_groups = []
+            local_groups = []
+            prefix = f"Probe {index + 1} "
+            for group in self.groups:
+                target = [ch for ch in group.channels if offset <= ch < offset + candidate.n_channels]
+                ordered = iter(sorted(target, key=lambda ch: key(ch - offset)))
+                channels = [next(ordered) if offset <= ch < offset + candidate.n_channels else ch for ch in group.channels]
+                ordered_groups.append(ChannelGroup(group.name, channels))
+                local = [ch - offset for ch in channels if offset <= ch < offset + candidate.n_channels]
+                if local:
+                    local_groups.append(ChannelGroup(group.name.removeprefix(prefix), local))
+            candidate.groups = local_groups or None
+            self.groups = ordered_groups
+            self.group_designs = group_designs_from_groups(self.groups)
         self.probes[index] = candidate
         self.selected_channels = None
         self._refresh_probe_controls()
@@ -611,7 +646,7 @@ class MainWindow(QMainWindow):
         if geometry is not None and geometry.physical_sites:
             known_positions = set(geometry.physical_sites.values())
             if any(position not in known_positions for position in mapping.positions.values()):
-                raise ProbeGeometryError("Map coordinates do not match this physical layout. Use Active site IDs in DAT order, or matching probe-local coordinates.")
+                raise ProbeGeometryError("Map coordinates do not match this physical layout. Load Neuropixels metadata/IMRO matching DAT order, or matching probe-local coordinates.")
 
     def _load_probe_companion(self, index: int, xml_path: Path) -> None:
         candidates = [xml_path.with_suffix(".probes.json"), xml_path.with_suffix(".channelmap.json"),
@@ -638,41 +673,6 @@ class MainWindow(QMainWindow):
             except (ProbeGeometryError, ValueError, OSError) as exc:
                 self.statusBar().showMessage(f"Recording map: {exc}", 8000)
             break
-
-    def _edit_active_sites(self, index: int) -> None:
-        probe = self.probes[index]
-        geometry = load_probe_geometry(probe.probe_type)
-        if geometry is None or not geometry.physical_sites:
-            return
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"Probe {index + 1}: physical sites in DAT channel order")
-        dialog.resize(540, 380)
-        layout = QVBoxLayout(dialog)
-        label = QLabel(f"Enter {probe.n_channels} physical site IDs, starting with DAT channel 0.\n"
-                       "Separate IDs with spaces or commas. Single shank: 0, 1, …\n"
-                       "Four shank: shank:site, e.g. 0:0, 2:512. All IDs are zero-based.")
-        label.setWordWrap(True)
-        layout.addWidget(label)
-        editor = QTextEdit()
-        if probe.channel_map is not None:
-            editor.setPlainText(", ".join(probe.channel_map.site_ids.get(ch, "") for ch in range(probe.n_channels)))
-        layout.addWidget(editor)
-        buttons = QHBoxLayout()
-        apply = QPushButton("Apply")
-        cancel = QPushButton("Cancel")
-        def accept_sites():
-            try:
-                self._set_probe_channel_map(index, selected_site_map(editor.toPlainText(), geometry, probe.n_channels))
-            except ProbeGeometryError as exc:
-                QMessageBox.critical(dialog, "Active site IDs", str(exc))
-                return
-            dialog.accept()
-        apply.clicked.connect(accept_sites)
-        cancel.clicked.connect(dialog.reject)
-        buttons.addWidget(apply)
-        buttons.addWidget(cancel)
-        layout.addLayout(buttons)
-        dialog.exec()
 
     def _save_probe_xml(self, index: int) -> None:
         probe = self.probes[index]

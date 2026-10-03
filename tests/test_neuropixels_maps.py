@@ -203,7 +203,8 @@ def test_map_import_preserves_matching_xml_groups_and_bad_channels(tmp_path):
         w._apply_probe_configs_to_model()
         w._set_probe_channel_map(0, parse_imro(imro()))
         assert w.probes[0].xml_path == path
-        assert w.probes[0].groups == groups
+        assert [g.name for g in w.probes[0].groups] == [g.name for g in groups]
+        assert set(w.probes[0].groups[0].channels) == set(groups[0].channels)
         assert w.probes[0].bad_channels == {3}
     finally:
         w.close()

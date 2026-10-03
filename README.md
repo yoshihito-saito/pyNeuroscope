@@ -84,11 +84,8 @@ probe type.
 
 Choose a Neuropixels probe type and set `nChannels` to the number of DAT columns
 for that probe. The full physical layout is bundled; selecting a type does not
-invent an active recording map. Use `Active site IDs` to enter one physical site
-ID per DAT channel, in DAT column order. For NP1 and NP2 single shank, use
-zero-based site numbers, e.g. `384, 385, ...`. For NP2 four shank, use zero-based
-`shank:site` IDs, e.g. `0:0, 2:512, ...`. This order must match what the recording
-software actually saved. It does not configure the acquisition hardware.
+invent an active recording map. Load the recorded selection using each probe's
+`Recording map`. This does not configure the acquisition hardware.
 
 Each probe's `Recording map` accepts `neuropixels_probeN_metadata.json`
 (WILDX applied probe receipt version 1), an `.imro` file, a probe-local
@@ -101,12 +98,16 @@ IMRO channel IDs must match the DAT readout order (no reordered/subset DAT).
 NP1 and NP2 single/four-shank IMRO layouts with numeric or part-number headers
 are supported; multiple-bank NP2 masks and other physical layouts are rejected.
 IMRO field definitions follow the [SpikeGLX documentation](https://billkarsh.github.io/SpikeGLX/help/imroTables/).
-Importing a map does not set sampling rates or gain.
+Importing a map sorts channels within each group from the top of the displayed
+geometry downward, with ties ordered left to right. DAT IDs, group membership,
+and the raw recording remain unchanged. Importing a map does not set sampling
+rates or gain.
 `Load Session ChannelMap`
 uses combined DAT channel IDs. Unknown/disconnected rows retain their original
 channel numbering. Active/connected flags are separate from bad-channel marking
-and the temporary display selection. Double-clicking a channel still toggles
-its bad-channel status.
+and the temporary display selection. Left-drag uses a transparent rectangle;
+double-click clears an active selection. With no selection, double-clicking a
+channel toggles its bad-channel status.
 
 Updating probe XML or saving session XML saves a `.probes.json` companion.
 Keep this file alongside its XML to restore probe
@@ -114,6 +115,12 @@ types, maps, and probe colormaps. Adjacent Atlaxis `.chanCoords.channelInfo.mat`
 companions are also loaded. Rectangle selections are temporary and are not
 saved into XML channel groups or bad-channel flags. NP2's 200 µm
 tip-to-first-site offset follows Atlaxis and is provisional.
+
+For multiple probes, add one row per probe and load each probe-local XML with
+that row's `Probe XML` button. Each XML uses local channel IDs starting at zero;
+session XML uses combined DAT IDs. A session XML alone does not identify probe
+ownership: keep its `.probes.json` companion to restore multiple probes.
+Recording controls scroll vertically when the panel is too short.
 
 Waveform drawing uses peak-preserving display envelopes and cached Qt paths and
 images. The original samples remain available to filtering, spectra, and other

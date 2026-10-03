@@ -69,8 +69,7 @@ Coordinates are micrometers with +y toward the base; NP2's 200 µm first-site
 offset is provisional. The legacy `neuropixel` pattern is hidden from the
 type selector, but saved configurations using it can still be loaded.
 
-Select physical site IDs in DAT channel order using `Active site IDs`, or load
-an explicit recording map. Each probe's `Recording map` also accepts a WILDX
+Load an explicit recording map using each probe's `Recording map`, which accepts a WILDX
 `neuropixels_probeN_metadata.json` applied receipt (version 1) or `.imro` file;
 these set the type and 384 readout columns automatically. NP1 bank/channel or
 NP2 electrode/shank fields identify the physical sites. IMRO channel IDs must

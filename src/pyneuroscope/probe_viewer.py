@@ -32,7 +32,7 @@ class ProbeViewer(QWidget):
         self._pan_origin = QPointF()
         self.setMinimumWidth(280)
         self.setMinimumHeight(420)
-        self.setToolTip("Wheel: zoom / Left drag: show enclosed channels / Right drag: pan")
+        self.setToolTip("Wheel: zoom / Left drag: show enclosed channels / Double-click: clear selection / Right drag: pan")
 
     def set_probe(
         self,
@@ -278,7 +278,7 @@ class ProbeViewer(QWidget):
                              Qt.AlignmentFlag.AlignCenter, "Load recording map for active sites")
         if self._drag_start is not None and self._drag_current is not None:
             rect = QRectF(self._drag_start, self._drag_current).normalized()
-            painter.fillRect(rect, QColor(120, 160, 220, 45))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.setPen(QPen(QColor("#7aa7ff")))
             painter.drawRect(rect)
 
@@ -322,6 +322,12 @@ class ProbeViewer(QWidget):
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
         self._drag_start = self._drag_current = None
         if event.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._selected_channels is not None:
+            self._selected_channels = None
+            self.channelsSelected.emit(None)
+            self.update()
+            event.accept()
             return
         pos = event.position()
         channel = self._channel_at(pos.x(), pos.y())
