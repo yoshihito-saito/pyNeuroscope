@@ -106,7 +106,9 @@ rates or gain.
 uses combined DAT channel IDs. Unknown/disconnected rows retain their original
 channel numbering. Active/connected flags are separate from bad-channel marking
 and the temporary display selection. Left-drag uses a transparent rectangle;
-double-click clears an active selection. With no selection, double-clicking a
+Ctrl+click adds/removes individual channels, and Ctrl+drag adds another range.
+The first Ctrl+click starts a selection containing that channel.
+Double-click clears an active selection. With no selection, double-clicking a
 channel toggles its bad-channel status.
 
 Updating probe XML or saving session XML saves a `.probes.json` companion.

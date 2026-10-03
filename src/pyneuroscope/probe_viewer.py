@@ -29,10 +29,11 @@ class ProbeViewer(QWidget):
         self._zoom = 1.0
         self._pan = QPointF()
         self._drag_start = self._drag_current = self._pan_start = None
+        self._drag_additive = False
         self._pan_origin = QPointF()
         self.setMinimumWidth(280)
         self.setMinimumHeight(420)
-        self.setToolTip("Wheel: zoom / Left drag: show enclosed channels / Double-click: clear selection / Right drag: pan")
+        self.setToolTip("Wheel: zoom / Left drag: select range / Ctrl+click: toggle channel / Ctrl+drag: add range / Double-click: clear selection / Right drag: pan")
 
     def set_probe(
         self,
@@ -259,8 +260,9 @@ class ProbeViewer(QWidget):
         if event.button() != Qt.MouseButton.LeftButton:
             return
         pos = event.position()
+        self._drag_additive = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         group_index = self._group_at(pos.x(), pos.y())
-        if group_index is not None:
+        if group_index is not None and not self._drag_additive:
             self.groupClicked.emit(group_index)
         else:
             self._drag_start = self._drag_current = pos
@@ -285,6 +287,7 @@ class ProbeViewer(QWidget):
     def reset_view(self) -> None:
         self._zoom, self._pan = 1.0, QPointF()
         self._drag_start = self._drag_current = None
+        self._drag_additive = False
         self.update()
 
     def wheelEvent(self, event) -> None:  # noqa: N802
@@ -312,15 +315,31 @@ class ProbeViewer(QWidget):
         elif event.button() == Qt.MouseButton.LeftButton and self._drag_start is not None:
             rect = QRectF(self._drag_start, event.position()).normalized()
             if rect.width() >= 4 or rect.height() >= 4:
-                self.channelsSelected.emit(self.channels_in_rect(rect))
+                channels = self.channels_in_rect(rect)
+                if self._drag_additive:
+                    channels |= self._selected_channels or set()
+                self._select_channels(channels)
+            elif self._drag_additive:
+                channel = self._channel_at(event.position().x(), event.position().y())
+                if channel is not None:
+                    channels = set(self._selected_channels or set())
+                    channels.symmetric_difference_update({channel})
+                    self._select_channels(channels)
             self._drag_start = self._drag_current = None
+            self._drag_additive = False
             self.update()
+
+    def _select_channels(self, channels: set[int]) -> None:
+        self._selected_channels = set(channels)
+        self.channelsSelected.emit(set(channels))
+        self.update()
 
     def channels_in_rect(self, rect: QRectF) -> set[int]:
         return {ch for ch, (x, y, _) in self._dot_hits.items() if rect.contains(QPointF(x, y))}
 
     def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802
         self._drag_start = self._drag_current = None
+        self._drag_additive = False
         if event.button() != Qt.MouseButton.LeftButton:
             return
         if self._selected_channels is not None:
