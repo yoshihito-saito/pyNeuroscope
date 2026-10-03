@@ -3,13 +3,15 @@ from __future__ import annotations
 from typing import Sequence
 
 import numpy as np
-from PySide6.QtCore import QPoint, QPointF, QRect, Qt
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 from matplotlib import colormaps
 from pyqtgraph import arrayToQPath
 
 from .csd import CSD_COLORMAPS, robust_csd_limits, standard_1d_csd
+from .bitmap_display import bitmap_amplitudes
+from .color_map import COLOR_MAP_NAMES, palette_from_name
 from .models import SignalEventOverlay, SignalSpikeOverlay
 from .signal_layout import TraceLayoutItem
 from .trace_display import peak_envelope_indices, trace_statistics
@@ -47,6 +49,11 @@ class SignalViewer(QWidget):
         self._trace_cache_key = None
         self._path_cache: dict[int, tuple[tuple, QPainterPath]] = {}
         self._trace_image_cache = None
+        self._display_mode = "trace"
+        self._bitmap_cache = None
+        self._bitmap_colormap = "summer"
+        self._bitmap_channel_colormaps: dict[int, str] = {}
+        self._bitmap_luts: dict[str, np.ndarray] = {}
         self.setMinimumHeight(360)
         self.setMinimumWidth(520)
         self.setAutoFillBackground(True)
@@ -67,6 +74,7 @@ class SignalViewer(QWidget):
             self._trace_cache.clear()
             self._path_cache.clear()
             self._trace_image_cache = None
+            self._bitmap_cache = None
         self._time_seconds = time_seconds
         self._data = data
         self._layout_items = list(layout_items)
@@ -99,6 +107,19 @@ class SignalViewer(QWidget):
 
     def set_background_mode(self, mode: str) -> None:
         self._background_mode = "white" if str(mode).lower() == "white" else "black"
+        self.update()
+
+    def set_display_mode(self, mode: str) -> None:
+        self._display_mode = "bitmap" if mode == "bitmap" else "trace"
+        self.update()
+
+    def set_bitmap_colormaps(self, name: str, channel_colormaps: dict[int, str] | None = None) -> None:
+        clean = name if name in COLOR_MAP_NAMES else "summer"
+        overrides = {ch: cmap for ch, cmap in (channel_colormaps or {}).items() if cmap in COLOR_MAP_NAMES}
+        if clean != self._bitmap_colormap or overrides != self._bitmap_channel_colormaps:
+            self._bitmap_colormap = clean
+            self._bitmap_channel_colormaps = overrides
+            self._bitmap_cache = None
         self.update()
 
     def set_csd_overlay(self, show: bool, colormap_name: str = "bwr") -> None:
@@ -168,7 +189,8 @@ class SignalViewer(QWidget):
         start_index, end_index = self._visible_sample_bounds(data.shape[0])
         visible_data = data[start_index:end_index]
         visible_time = self._time_seconds[start_index:end_index]
-        csd_data = self._csd_display_data(visible_data, visible_time, max_points) if self._show_csd else visible_data
+        show_csd = self._show_csd and self._display_mode == "trace"
+        csd_data = self._csd_display_data(visible_data, visible_time, max_points) if show_csd else visible_data
         cache_key = (start_index, end_index, max_points)
         if cache_key != self._trace_cache_key:
             self._trace_cache_key = cache_key
@@ -178,7 +200,7 @@ class SignalViewer(QWidget):
         trace_pen_width = self._trace_pen_width(visible_time, trace_width, columns=columns)
         item_geometries: dict[int, tuple[float, float, float, float, float, float]] = {}
 
-        if self._show_csd and csd_data.shape[0] >= 2:
+        if show_csd and csd_data.shape[0] >= 2:
             self._draw_csd_background(
                 painter,
                 csd_data,
@@ -192,7 +214,7 @@ class SignalViewer(QWidget):
                 trace_bottom,
             )
 
-        if visible_time.size >= 2:
+        if visible_time.size >= 2 and self._display_mode != "bitmap":
             self._draw_signal_event_overlays(
                 painter,
                 visible_time,
@@ -210,7 +232,14 @@ class SignalViewer(QWidget):
                      self._show_channel_labels, self._background_mode, trace_pen_width, bottom_overlay_height)
         cached_layer = self._trace_image_cache
         layer = None
-        if cached_layer is not None and cached_layer[0] == layer_key:
+        if self._display_mode == "bitmap":
+            item_geometries = self._draw_bitmap(
+                painter, visible_data, visible_items, rows_by_column, cache_key,
+                margin_left, column_width, label_gutter, trace_width, margin_top, trace_bottom,
+            )
+            draw_items = []
+            trace_painter = painter
+        elif cached_layer is not None and cached_layer[0] == layer_key:
             painter.drawImage(0, 0, cached_layer[1])
             item_geometries = cached_layer[2]
             draw_items = []
@@ -272,6 +301,12 @@ class SignalViewer(QWidget):
             trace_painter.end()
             self._trace_image_cache = (layer_key, layer, item_geometries)
             painter.drawImage(0, 0, layer)
+
+        if self._display_mode == "bitmap" and visible_time.size >= 2:
+            self._draw_signal_event_overlays(
+                painter, visible_time, columns, margin_left, column_width,
+                label_gutter, trace_width, margin_top, trace_bottom, below=False,
+            )
 
         if visible_time.size >= 2 and self._epoch_boundaries.size:
             self._draw_epoch_boundaries(
@@ -340,6 +375,64 @@ class SignalViewer(QWidget):
             painter.fillRect(rect, QColor(120, 160, 220, 55))
             painter.setPen(QPen(QColor("#7aa7ff")))
             painter.drawRect(rect)
+
+    def _draw_bitmap(self, painter, data, items, rows_by_column, bounds,
+                     margin_left, column_width, label_gutter, trace_width, top, bottom):
+        valid = [item for item in items if 0 <= item.channel < data.shape[1]]
+        if not valid or not len(data):
+            return {}
+        pixels = max(1, int(trace_width))
+        key = (bounds[:2], pixels, tuple(valid), self._vertical_scale,
+               self._bitmap_colormap, tuple(sorted(self._bitmap_channel_colormaps.items())))
+        cached = self._bitmap_cache
+        if cached is None or cached[0] != key:
+            channels = list(dict.fromkeys(item.channel for item in valid))
+            amplitudes, centers, limit = bitmap_amplitudes(data, channels, pixels)
+            amplitude_by_channel = dict(zip(channels, amplitudes))
+            images = {}
+            for column in sorted({item.column for item in valid}):
+                rgba = np.zeros((rows_by_column[column], amplitudes.shape[1], 4), dtype=np.uint8)
+                for item in valid:
+                    if item.column != column:
+                        continue
+                    values = amplitude_by_channel[item.channel]
+                    finite = np.isfinite(values)
+                    normalized = np.clip(np.where(finite, values, 0.0) * self._vertical_scale / limit, -1.0, 1.0)
+                    indices = np.rint((normalized + 1.0) * 127.5).astype(np.uint8)
+                    name = self._bitmap_channel_colormaps.get(item.channel, self._bitmap_colormap)
+                    if name not in self._bitmap_luts:
+                        self._bitmap_luts[name] = np.asarray([
+                            [int(color[i:i + 2], 16) for i in (1, 3, 5)] + [255]
+                            for color in palette_from_name(name, 256)
+                        ], dtype=np.uint8)
+                    rgba[item.row] = self._bitmap_luts[name][indices]
+                    rgba[item.row, ~finite, 3] = 0
+                images[column] = QImage(rgba.data, rgba.shape[1], rgba.shape[0], rgba.strides[0],
+                                        QImage.Format.Format_RGBA8888).copy()
+            cached = (key, images, centers, limit)
+            self._bitmap_cache = cached if sum(im.sizeInBytes() for im in images.values()) <= 64 * 1024 * 1024 else None
+        _, images, centers, limit = cached
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
+        geometries = {}
+        for column, image in images.items():
+            left = margin_left + column * column_width + label_gutter
+            painter.drawImage(QRectF(left, top, trace_width, bottom - top), image)
+        for item in valid:
+            row_height = max(1.0, (bottom - top) / rows_by_column[item.column])
+            x0 = margin_left + item.column * column_width
+            y = top + (item.row + 0.5) * row_height
+            geometries[item.channel] = (x0 + label_gutter, trace_width, y, row_height, centers[item.channel], limit)
+            if self._show_channel_labels and row_height >= 5.0 and label_gutter >= 28:
+                font = QFont()
+                font.setPointSize(max(6, min(9, int(row_height * .7))))
+                painter.setFont(font)
+                painter.setPen(QPen(self._color("muted") if item.is_bad else self._color("label")))
+                painter.drawText(QRectF(x0 + 2, y - row_height * .45, label_gutter - 6, max(8.0, row_height * .9)),
+                                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, f"ch {item.channel}")
+        painter.setFont(QFont())
+        painter.setPen(QPen(self._color("label")))
+        painter.drawText(50, 16, f"Amplitude: −{limit / self._vertical_scale:.3g} … +{limit / self._vertical_scale:.3g} counts (median centered)")
+        return geometries
 
     def _display_trace(self, channel, data, time, max_points):
         cached = self._trace_cache.get(channel)
@@ -1019,6 +1112,11 @@ class SignalViewer(QWidget):
         margin_left = 70
         margin_right = 12
         label_gutter = 54
+        if self._display_mode == "bitmap":
+            compact = self._uses_compact_geometry_columns()
+            margin_left = 38 if compact else 50
+            margin_right = 10
+            label_gutter = 12 if compact else 38
         columns = max(item.column for item in self._layout_items) + 1
         column_width = max(24.0, (width - margin_left - margin_right) / columns)
         trace_width = max(8.0, column_width - label_gutter - 8)
@@ -1041,6 +1139,8 @@ class SignalViewer(QWidget):
         height = max(1, self.height())
         margin_top = 24
         margin_bottom = 24
+        if self._display_mode == "bitmap":
+            margin_bottom += self._bottom_overlay_height()
         rows = self._display_row_count()
         trace_height = max(1.0, (height - margin_top - margin_bottom) / max(1, rows))
         top = max(0.0, min(y1, y2) - margin_top)

@@ -130,6 +130,18 @@ analysis. To compare synthetic offscreen drawing with a Git revision, run
 `python tools/benchmark_trace_rendering.py --baseline main`; this excludes file
 reading and filtering.
 
+`Mode`, to the left of `View`, switches between `trace` and `bitmap`.
+Bitmap displays time horizontally and channels vertically using the existing
+Color map settings, including per-probe and per-region maps. It retains the
+current channel selection/order and single/group-column layout. Channel medians
+estimated from representative display samples are removed; one symmetric 98th
+percentile amplitude limit is shared across visible channels. `Scale` adjusts
+the color contrast; the displayed limits are in ADC counts relative to each
+channel's median. Each time pixel keeps the strongest signed excursion in its
+sample bin, and missing bins are transparent. Bitmap images are cached; the
+original and processed sample arrays are unchanged. Time/row zoom and event or
+spike overlays remain available. CSD overlay is available in trace mode.
+
 ## Install
 
 For normal use, download `pyNeuroscope-Setup.exe` and double-click it.

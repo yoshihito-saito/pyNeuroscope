@@ -971,6 +971,9 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         layout = QVBoxLayout(panel)
         mode_row = QHBoxLayout()
+        self.display_mode = QComboBox()
+        self.display_mode.addItems(["trace", "bitmap"])
+        self.display_mode.currentTextChanged.connect(self._view_mode_changed)
         self.view_mode = QComboBox()
         self.view_mode.addItems(["single_column", "group_columns"])
         self.view_mode.currentTextChanged.connect(self._view_mode_changed)
@@ -990,6 +993,8 @@ class MainWindow(QMainWindow):
         self.spacing.setSingleStep(0.1)
         self.spacing.setValue(1.0)
         self.spacing.valueChanged.connect(self._spacing_changed)
+        mode_row.addWidget(QLabel("Mode"))
+        mode_row.addWidget(self.display_mode)
         mode_row.addWidget(QLabel("View"))
         mode_row.addWidget(self.view_mode)
         mode_row.addWidget(QLabel("Background"))
@@ -2864,6 +2869,8 @@ class MainWindow(QMainWindow):
         self._refresh_viewer_layout()
 
     def _default_scale(self) -> float:
+        if self.display_mode.currentText() == "bitmap":
+            return 1.0
         if self.view_mode.currentText() == "group_columns":
             return 0.8 if self.bandpass_enabled.isChecked() else 1.0
         return 1.0 if self.bandpass_enabled.isChecked() else 8.0
@@ -2913,6 +2920,21 @@ class MainWindow(QMainWindow):
                 self.channel_colors,
                 channel_geometry=channel_geometry,
             )
+        self.viewer.set_display_mode(self.display_mode.currentText())
+        overrides = {}
+        if self.color_mode.currentText() == "per probe":
+            offset = 0
+            for probe in self.probes:
+                overrides.update({ch: probe.cmap for ch in range(offset, offset + probe.n_channels)})
+                offset += probe.n_channels
+        elif self.color_mode.currentText() == "per region":
+            for channel, region in self.channel_regions.items():
+                combo = self.region_cmap_controls.get(region.strip())
+                if combo is not None:
+                    overrides[channel] = combo.currentText()
+        self.viewer.set_bitmap_colormaps(self.color_map.currentText(), overrides)
+        self.csd_enabled.setEnabled(self.display_mode.currentText() == "trace")
+        self.csd_cmap.setEnabled(self.display_mode.currentText() == "trace")
         self.viewer.set_viewport_height(self.signal_scroll.viewport().height())
         self.viewer.set_background_mode(self.signal_background.currentText() if hasattr(self, "signal_background") else "black")
         self.viewer.set_csd_overlay(
