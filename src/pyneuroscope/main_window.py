@@ -2876,7 +2876,7 @@ class MainWindow(QMainWindow):
 
     def _default_scale(self) -> float:
         if self.display_mode.currentText() == "bitmap":
-            return 1.0
+            return 0.8
         if self.view_mode.currentText() == "group_columns":
             return 0.8 if self.bandpass_enabled.isChecked() else 1.0
         return 1.0 if self.bandpass_enabled.isChecked() else 8.0

@@ -136,17 +136,17 @@ Color map settings, including per-probe and per-region maps. It retains the
 current channel selection/order and single/group-column layout. Channel medians
 estimated from representative display samples are removed; one symmetric 98th
 percentile amplitude limit is shared across visible channels. `Scale` adjusts
-the color contrast; the displayed limits are in ADC counts relative to each
-channel's median. Each time pixel keeps the strongest signed excursion in its
-sample bin, and missing bins are transparent. Bitmap images are cached; the
+the color contrast (bitmap defaults to `0.8` for a softer display); the displayed
+limits are in ADC counts relative to each channel's median. Each time pixel keeps
+the strongest signed excursion in its sample bin, and missing bins are transparent. Bitmap images are cached; the
 original and processed sample arrays are unchanged. Time/row zoom and event or
 spike overlays remain available. CSD overlay is available in trace mode.
 
 `Color mode` selects the cmap controls shown below it: one `Color map` for
 `all`/`group`, or individual selectors for `per probe`/`per region`. Switching
 modes retains the cmap selections. The amplitude maps `red_white_black` and
-`blue_white_black` run from red/blue for negative values through white at zero
-to black for positive values. `coolwarm` uses the standard
+`blue_white_black` use the red/blue endpoints of `coolwarm` for negative values,
+through white at zero to black for positive values. `coolwarm` uses the standard
 [Matplotlib colormap](https://matplotlib.org/stable/gallery/color/colormap_reference.html).
 
 ## Install

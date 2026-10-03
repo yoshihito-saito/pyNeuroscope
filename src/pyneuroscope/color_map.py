@@ -37,8 +37,9 @@ COLOR_MAPS = {
     "cool": ["#00ffff", "#40bfff", "#8080ff", "#bf40ff", "#ff00ff"],
     "Wistia": ["#e4ff7a", "#ffed3f", "#ffc917", "#ff9a00", "#fc4e00"],
     "rainbow": ["#2d5bff", "#00a4ff", "#00d084", "#d8e52d", "#ff9d00", "#ff3d3d", "#b032ff"],
-    "red_white_black": ["#ff0000", "#ffffff", "#000000"],
-    "blue_white_black": ["#0000ff", "#ffffff", "#000000"],
+    # Colored endpoints match Matplotlib's coolwarm; zero remains white.
+    "red_white_black": ["#b40426", "#ffffff", "#000000"],
+    "blue_white_black": ["#3b4cc0", "#ffffff", "#000000"],
 }
 
 COLOR_MAP_NAMES = [*COLOR_MAPS, "coolwarm"]

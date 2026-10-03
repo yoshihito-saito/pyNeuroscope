@@ -119,7 +119,7 @@ def test_mode_control_before_view_uses_existing_probe_cmaps_and_selection(app):
         w._select_probe_channels({0, 3})
         w.display_mode.setCurrentText("bitmap")
         assert w.viewer._display_mode == "bitmap"
-        assert w.scale.value() == 1
+        assert w.scale.value() == .8
         assert [i.channel for i in w.viewer._layout_items] == [0, 3]
         assert w.viewer._bitmap_channel_colormaps == {0: "Blues", 1: "Blues", 2: "Reds", 3: "Reds"}
         assert not w.csd_enabled.isEnabled()

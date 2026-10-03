@@ -71,8 +71,8 @@ def test_color_map_names_match_recording_window_order() -> None:
 
 
 @pytest.mark.parametrize("name, colors", [
-    ("red_white_black", ["#ff0000", "#ffffff", "#000000"]),
-    ("blue_white_black", ["#0000ff", "#ffffff", "#000000"]),
+    ("red_white_black", ["#b40426", "#ffffff", "#000000"]),
+    ("blue_white_black", ["#3b4cc0", "#ffffff", "#000000"]),
     ("coolwarm", ["#3b4cc0", "#dddcdc", "#b40426"]),
 ])
 def test_diverging_maps_have_expected_negative_zero_positive_colors(name, colors):
