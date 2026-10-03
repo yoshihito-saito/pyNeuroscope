@@ -107,6 +107,7 @@ class MainWindow(QMainWindow):
         self.channel_colors: dict[int, str] = {}
         self.channel_regions: dict[int, str] = {}
         self.region_cmap_controls: dict[str, QComboBox] = {}
+        self._region_cmap_names: dict[str, str] = {}
         self.loaded_metadata = RecordingMetadata()
         self._group_source = "default"
         self._recording_dat_paths: list[Path] = []
@@ -1082,7 +1083,8 @@ class MainWindow(QMainWindow):
         self.color_mode.addItems(["all", "group", "per region", "per probe"])
         self.color_mode.setCurrentText("all")
         self.color_mode.currentTextChanged.connect(self._color_mode_changed)
-        color_row = QHBoxLayout()
+        self.color_map_panel = QWidget()
+        color_row = QHBoxLayout(self.color_map_panel)
         color_row.setContentsMargins(0, 0, 0, 0)
         color_row.addWidget(QLabel("Color map"))
         color_row.addWidget(self.color_map, 1)
@@ -1106,8 +1108,8 @@ class MainWindow(QMainWindow):
         probe_navigation.addWidget(show_all)
         probe_navigation.addWidget(fit)
         layout.addLayout(probe_navigation)
-        layout.addLayout(color_row)
         layout.addLayout(color_mode_row)
+        layout.addWidget(self.color_map_panel)
         layout.addWidget(self.region_cmap_panel)
         layout.addWidget(self.probe_cmap_panel)
         return panel
@@ -2555,6 +2557,7 @@ class MainWindow(QMainWindow):
         self._refresh_viewer_layout()
 
     def _color_mode_changed(self) -> None:
+        self.color_map_panel.setVisible(self.color_mode.currentText() in ("all", "group"))
         self._refresh_region_cmap_controls()
         self._refresh_probe_cmap_controls()
         self._reset_colors()
@@ -2565,6 +2568,7 @@ class MainWindow(QMainWindow):
         while self.probe_cmap_layout.count():
             item = self.probe_cmap_layout.takeAt(0)
             if item.widget() is not None:
+                item.widget().hide()
                 item.widget().deleteLater()
         self.probe_cmap_controls = {}
         visible = self.color_mode.currentText() == "per probe"
@@ -2597,10 +2601,12 @@ class MainWindow(QMainWindow):
     def _refresh_region_cmap_controls(self) -> None:
         if not hasattr(self, "region_cmap_layout"):
             return
+        self._region_cmap_names.update({region: combo.currentText() for region, combo in self.region_cmap_controls.items()})
         while self.region_cmap_layout.count():
             item = self.region_cmap_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
+                widget.hide()
                 widget.deleteLater()
         self.region_cmap_controls = {}
         regions = self._ordered_channel_regions()
@@ -2614,7 +2620,7 @@ class MainWindow(QMainWindow):
         for region in regions:
             combo = QComboBox()
             combo.addItems(COLOR_MAP_NAMES)
-            combo.setCurrentText(self.color_map.currentText())
+            combo.setCurrentText(self._region_cmap_names.get(region, self.color_map.currentText()))
             combo.currentTextChanged.connect(self._reset_colors)
             self.region_cmap_layout.addRow(region, combo)
             self.region_cmap_controls[region] = combo

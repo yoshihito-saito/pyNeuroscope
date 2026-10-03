@@ -142,6 +142,13 @@ sample bin, and missing bins are transparent. Bitmap images are cached; the
 original and processed sample arrays are unchanged. Time/row zoom and event or
 spike overlays remain available. CSD overlay is available in trace mode.
 
+`Color mode` selects the cmap controls shown below it: one `Color map` for
+`all`/`group`, or individual selectors for `per probe`/`per region`. Switching
+modes retains the cmap selections. The amplitude maps `red_white_black` and
+`blue_white_black` run from red/blue for negative values through white at zero
+to black for positive values. `coolwarm` uses the standard
+[Matplotlib colormap](https://matplotlib.org/stable/gallery/color/colormap_reference.html).
+
 ## Install
 
 For normal use, download `pyNeuroscope-Setup.exe` and double-click it.

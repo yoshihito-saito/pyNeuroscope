@@ -88,16 +88,17 @@ def test_bitmap_cache_colormap_scale_zoom_and_data_invalidation(app, monkeypatch
         v.close()
 
 
-def test_bitmap_missing_samples_transparent_and_existing_palette_exact(app):
+@pytest.mark.parametrize("cmap", ["winter", "red_white_black", "blue_white_black", "coolwarm"])
+def test_bitmap_missing_samples_transparent_and_existing_palette_exact(app, cmap):
     v = SignalViewer()
     try:
         data = np.column_stack([np.zeros(10), np.full(10, np.nan)])
         v.set_display_mode("bitmap")
-        v.set_bitmap_colormaps("winter")
+        v.set_bitmap_colormaps(cmap)
         v.set_traces(np.arange(10), data, items())
         v.grab()
         image = v._bitmap_cache[1][0]
-        assert image.pixelColor(0, 0).name() == palette_from_name("winter", 256)[128]
+        assert image.pixelColor(0, 0).name() == palette_from_name(cmap, 256)[128]
         assert image.pixelColor(0, 1).alpha() == 0
         assert np.isnan(data[:, 1]).all()
     finally:
@@ -128,6 +129,44 @@ def test_mode_control_before_view_uses_existing_probe_cmaps_and_selection(app):
         assert w.viewer._display_mode == "trace"
         assert w.csd_enabled.isEnabled()
         assert np.array_equal(w._current_data, raw)
+    finally:
+        w.close()
+
+
+def test_color_mode_shows_only_relevant_selectors_and_retains_choices(app):
+    w = MainWindow()
+    try:
+        w.probes = [ProbeConfig(2, cmap="red_white_black"), ProbeConfig(2, cmap="blue_white_black")]
+        w._apply_probe_configs_to_model()
+        w.display_mode.setCurrentText("bitmap")
+        right_layout = w.color_map_panel.parentWidget().layout()
+        mode_row_index = next(i for i in range(right_layout.count())
+                              if right_layout.itemAt(i).layout() is not None
+                              and right_layout.itemAt(i).layout().indexOf(w.color_mode) >= 0)
+        assert mode_row_index < right_layout.indexOf(w.color_map_panel)
+        for mode in ("all", "group"):
+            w.color_mode.setCurrentText(mode)
+            assert not w.color_map_panel.isHidden()
+            assert w.probe_cmap_panel.isHidden() and w.region_cmap_panel.isHidden()
+        w.color_mode.setCurrentText("per probe")
+        assert w.color_map_panel.isHidden() and w.region_cmap_panel.isHidden()
+        assert not w.probe_cmap_panel.isHidden()
+        w.probe_cmap_controls[0].setCurrentText("coolwarm")
+        assert w.viewer._bitmap_channel_colormaps == {0: "coolwarm", 1: "coolwarm", 2: "blue_white_black", 3: "blue_white_black"}
+        w.channel_regions = {0: "CA1", 1: "CA1", 2: "PFC", 3: "PFC"}
+        w.color_mode.setCurrentText("per region")
+        assert w.color_map_panel.isHidden() and w.probe_cmap_panel.isHidden()
+        assert not w.region_cmap_panel.isHidden()
+        w.region_cmap_controls["CA1"].setCurrentText("red_white_black")
+        w.region_cmap_controls["PFC"].setCurrentText("blue_white_black")
+        w.color_mode.setCurrentText("all")
+        assert w.color_map.currentText() == "summer"
+        w.color_mode.setCurrentText("per region")
+        assert w.region_cmap_controls["CA1"].currentText() == "red_white_black"
+        assert w.region_cmap_controls["PFC"].currentText() == "blue_white_black"
+        assert w.viewer._bitmap_channel_colormaps == {0: "red_white_black", 1: "red_white_black", 2: "blue_white_black", 3: "blue_white_black"}
+        w.color_mode.setCurrentText("per probe")
+        assert w.probe_cmap_controls[0].currentText() == "coolwarm"
     finally:
         w.close()
 

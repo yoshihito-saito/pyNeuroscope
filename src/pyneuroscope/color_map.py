@@ -37,9 +37,11 @@ COLOR_MAPS = {
     "cool": ["#00ffff", "#40bfff", "#8080ff", "#bf40ff", "#ff00ff"],
     "Wistia": ["#e4ff7a", "#ffed3f", "#ffc917", "#ff9a00", "#fc4e00"],
     "rainbow": ["#2d5bff", "#00a4ff", "#00d084", "#d8e52d", "#ff9d00", "#ff3d3d", "#b032ff"],
+    "red_white_black": ["#ff0000", "#ffffff", "#000000"],
+    "blue_white_black": ["#0000ff", "#ffffff", "#000000"],
 }
 
-COLOR_MAP_NAMES = list(COLOR_MAPS)
+COLOR_MAP_NAMES = [*COLOR_MAPS, "coolwarm"]
 
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
@@ -66,6 +68,13 @@ def spring_palette(size: int) -> list[str]:
 def palette_from_name(name: str, size: int) -> list[str]:
     if size <= 0:
         raise ColorMapError("palette size must be positive")
+    if name == "coolwarm":
+        # Use the standard Matplotlib map, rather than a few approximate anchors.
+        from matplotlib import colormaps
+        from matplotlib.colors import to_hex
+
+        cmap = colormaps[name]
+        return [to_hex(cmap(index / max(1, size - 1))) for index in range(size)]
     anchors = COLOR_MAPS.get(name)
     if anchors is None:
         raise ColorMapError(f"Unknown color map: {name}")

@@ -64,7 +64,19 @@ def test_color_map_names_match_recording_window_order() -> None:
         "cool",
         "Wistia",
         "rainbow",
+        "red_white_black",
+        "blue_white_black",
+        "coolwarm",
     ]
+
+
+@pytest.mark.parametrize("name, colors", [
+    ("red_white_black", ["#ff0000", "#ffffff", "#000000"]),
+    ("blue_white_black", ["#0000ff", "#ffffff", "#000000"]),
+    ("coolwarm", ["#3b4cc0", "#dddcdc", "#b40426"]),
+])
+def test_diverging_maps_have_expected_negative_zero_positive_colors(name, colors):
+    assert palette_from_name(name, 3) == colors
 
 
 def test_color_by_group_preserves_group_assignment() -> None:
