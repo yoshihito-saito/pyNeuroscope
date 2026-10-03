@@ -46,7 +46,6 @@ These probe types are available even without JSON files:
 - `poly3`
 - `poly5`
 - `staggered`
-- `neuropixel`
 - `double_sided`
 - `neurogrid`
 
@@ -67,11 +66,16 @@ Three complete physical layouts are bundled in
 four shank (5120 sites). Their parameters and site-ID convention follow
 [Atlaxis](https://github.com/yoshihito-saito/Atlaxis/tree/main/probes/Neuropixels).
 Coordinates are micrometers with +y toward the base; NP2's 200 µm first-site
-offset is provisional. The legacy `neuropixel` pattern remains a schematic
-based on group order and is separate from these complete layouts.
+offset is provisional. The legacy `neuropixel` pattern is hidden from the
+type selector, but saved configurations using it can still be loaded.
 
 Select physical site IDs in DAT channel order using `Active site IDs`, or load
-an explicit recording map. The geometry catalog assigns no DAT channels by
+an explicit recording map. Each probe's `Recording map` also accepts a WILDX
+`neuropixels_probeN_metadata.json` applied receipt (version 1) or `.imro` file;
+these set the type and 384 readout columns automatically. NP1 bank/channel or
+NP2 electrode/shank fields identify the physical sites. IMRO channel IDs must
+match the DAT column order. NP2 multi-bank masks are not supported.
+The geometry catalog assigns no DAT channels by
 itself. Atlaxis nested `chanCoords` MAT structures are supported; their
 one-based channel field is converted to zero-based DAT IDs without removing
 disconnected rows. Site IDs such as `s0_front_0384` are preserved when supplied.

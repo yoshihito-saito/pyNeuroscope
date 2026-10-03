@@ -90,8 +90,19 @@ zero-based site numbers, e.g. `384, 385, ...`. For NP2 four shank, use zero-base
 `shank:site` IDs, e.g. `0:0, 2:512, ...`. This order must match what the recording
 software actually saved. It does not configure the acquisition hardware.
 
-`Recording map` loads a probe-local `chanMap.mat`, Atlaxis
-`chanCoords.channelInfo.mat`, or an explicit JSON map. `Load Session ChannelMap`
+Each probe's `Recording map` accepts `neuropixels_probeN_metadata.json`
+(WILDX applied probe receipt version 1), an `.imro` file, a probe-local
+`chanMap.mat`, Atlaxis `chanCoords.channelInfo.mat`, or an explicit JSON map.
+Neuropixels metadata and IMRO automatically set that probe's type and 384 DAT
+columns; a different channel count clears that probe's incompatible XML groups.
+WILDX uses `configuration.channels[].output_channel` and `site`; disconnected
+and standby channels are excluded from activity without compressing DAT columns.
+IMRO channel IDs must match the DAT readout order (no reordered/subset DAT).
+NP1 and NP2 single/four-shank IMRO layouts with numeric or part-number headers
+are supported; multiple-bank NP2 masks and other physical layouts are rejected.
+IMRO field definitions follow the [SpikeGLX documentation](https://billkarsh.github.io/SpikeGLX/help/imroTables/).
+Importing a map does not set sampling rates or gain.
+`Load Session ChannelMap`
 uses combined DAT channel IDs. Unknown/disconnected rows retain their original
 channel numbering. Active/connected flags are separate from bad-channel marking
 and the temporary display selection. Double-clicking a channel still toggles

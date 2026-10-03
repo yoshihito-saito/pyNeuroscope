@@ -421,7 +421,8 @@ class MainWindow(QMainWindow):
             for name in self._probe_geometry_names:
                 probe_type.addItem(name, name)
             if probe.probe_type and probe_type.findData(probe.probe_type) == -1:
-                probe_type.addItem(f"{probe.probe_type} (missing)", probe.probe_type)
+                status = "legacy" if probe.probe_type == "neuropixel" else "missing"
+                probe_type.addItem(f"{probe.probe_type} ({status})", probe.probe_type)
             type_index = probe_type.findData(probe.probe_type)
             probe_type.setCurrentIndex(max(0, type_index))
             probe_type.setMinimumContentsLength(18)
@@ -445,6 +446,7 @@ class MainWindow(QMainWindow):
             row_layout.addLayout(controls)
             map_row = QHBoxLayout()
             load_map = QPushButton("Recording map")
+            load_map.setToolTip("Load this probe's Neuropixels metadata JSON, IMRO, or MAT/JSON channel map")
             load_map.clicked.connect(lambda checked=False, probe_index=index: self._load_probe_channel_map(probe_index))
             map_row.addWidget(load_map)
             geometry = load_probe_geometry(probe.probe_type) if probe.probe_type else None
@@ -561,8 +563,10 @@ class MainWindow(QMainWindow):
             if missing else "")
 
     def _load_probe_channel_map(self, probe_index: int) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, f"Recording map for Probe {probe_index + 1}", "",
-                                             "Channel maps (*.mat *.json);;All files (*)")
+        selected = Path(self.dat_path.text().strip()) if self.dat_path.text().strip() else None
+        start = str(selected if selected.is_dir() else selected.parent) if selected is not None else ""
+        path, _ = QFileDialog.getOpenFileName(self, f"Recording map for Probe {probe_index + 1}", start,
+                                             "Recording maps (*.imro *.json *.mat);;Neuropixels metadata (*.json);;IMRO (*.imro);;MAT channel maps (*.mat);;All files (*)")
         if path:
             try:
                 self._set_probe_channel_map(probe_index, load_recording_channel_map(path))
@@ -571,11 +575,29 @@ class MainWindow(QMainWindow):
 
     def _set_probe_channel_map(self, index: int, mapping: RecordingChannelMap) -> None:
         probe = self.probes[index]
-        self._validate_probe_mapping(probe, mapping)
-        probe.channel_map = mapping
+        count_changed = mapping.n_channels is not None and mapping.n_channels != probe.n_channels
+        if count_changed:
+            # Match the DAT layout declared by the file, just as editing
+            # nChannels clears an XML with incompatible local channel groups.
+            candidate = ProbeConfig(mapping.n_channels, probe_type=mapping.probe_type or probe.probe_type,
+                                    cmap=probe.cmap, channel_map=mapping)
+        else:
+            candidate = replace(probe, probe_type=mapping.probe_type or probe.probe_type, channel_map=mapping)
+        if sum(p.n_channels for i, p in enumerate(self.probes) if i != index) + candidate.n_channels > self.n_channels.maximum():
+            raise ProbeGeometryError(f"Total nChannels exceeds {self.n_channels.maximum()}")
+        self._validate_probe_mapping(candidate, mapping)
+        self.probes[index] = candidate
         self.selected_channels = None
         self._refresh_probe_controls()
-        self._refresh_viewer_layout()
+        if count_changed:
+            self._apply_probe_configs_to_model()
+        else:
+            self._refresh_viewer_layout()
+        if mapping.probe_type:
+            message = f"Probe {index + 1}: {candidate.probe_type}, {candidate.n_channels} DAT channels, {len(mapping.active_channels)} active"
+            if count_changed and probe.xml_path is not None:
+                message += "; cleared XML because its channel count differed"
+            self.statusBar().showMessage(message, 8000)
 
     def _validate_probe_mapping(self, probe: ProbeConfig, mapping: RecordingChannelMap) -> None:
         if any(ch >= probe.n_channels for ch in mapping.positions):
@@ -1534,6 +1556,8 @@ class MainWindow(QMainWindow):
         chanmap_path = Path(path)
         try:
             mapping = load_recording_channel_map(chanmap_path)
+            if mapping.probe_type:
+                raise ProbeGeometryError("Neuropixels metadata and IMRO describe one probe. Use that probe's Recording map button.")
             geometry = mapping.positions
             offset = 0
             for probe in self.probes:

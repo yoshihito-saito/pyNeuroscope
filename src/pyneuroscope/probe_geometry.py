@@ -18,7 +18,6 @@ BUILTIN_PROBE_PATTERNS = (
     "poly3",
     "poly5",
     "staggered",
-    "neuropixel",
     "double_sided",
     "neurogrid",
 )
@@ -197,6 +196,8 @@ class RecordingChannelMap:
     positions: dict[int, ProbeSitePosition]
     active_channels: set[int]
     site_ids: dict[int, str] = field(default_factory=dict)
+    probe_type: str = ""
+    n_channels: int | None = None
 
     def __post_init__(self):
         channels = set(self.positions)
@@ -205,6 +206,11 @@ class RecordingChannelMap:
         ids = list(self.site_ids.values())
         if len(ids) != len(set(ids)):
             raise ProbeGeometryError("Duplicate physical site assignments")
+        if self.n_channels is not None and (
+            type(self.n_channels) is not int or self.n_channels <= 0
+            or any(ch >= self.n_channels for ch in channels)
+        ):
+            raise ProbeGeometryError("Invalid recording map channel count")
 
 
 def load_recording_channel_map(path: str | Path) -> RecordingChannelMap:
@@ -212,7 +218,10 @@ def load_recording_channel_map(path: str | Path) -> RecordingChannelMap:
     path = Path(path)
     try:
         if path.suffix.lower() == ".json":
-            return parse_recording_channel_map(json.loads(path.read_text(encoding="utf-8")))
+            return parse_recording_channel_map(json.loads(path.read_text(encoding="utf-8-sig")))
+        if path.suffix.lower() == ".imro":
+            from .neuropixels_maps import parse_imro
+            return parse_imro(path.read_text(encoding="utf-8-sig"))
         loaded = loadmat(path, simplify_cells=True)
         coords = loaded.get("chanCoords")
         if coords is not None:
@@ -267,6 +276,11 @@ def _checked_channel_ids(values) -> list[int]:
 
 
 def parse_recording_channel_map(raw: dict) -> RecordingChannelMap:
+    if not isinstance(raw, dict):
+        raise ProbeGeometryError("Recording map must be a JSON object")
+    if raw.get("format") == "WILDX NP applied probe receipt":
+        from .neuropixels_maps import parse_wildx_metadata
+        return parse_wildx_metadata(raw)
     # Atlaxis JSON includes geometry and the selected contact_to_channel table.
     if "geometry" in raw and "channel_map" in raw:
         contacts = {c["contact_id"]: c for c in raw["geometry"]["contacts"]}
@@ -392,7 +406,8 @@ def _canonical_pattern(pattern: str) -> str | None:
     clean = aliases.get(clean, clean)
     if clean == "chanmap.mat":
         return None
-    return clean if clean in {name.lower() for name in BUILTIN_PROBE_PATTERNS} else None
+    # Continue loading saved legacy configurations without offering this pattern.
+    return clean if clean in {name.lower() for name in BUILTIN_PROBE_PATTERNS} | {"neuropixel"} else None
 
 
 def _pattern_xy(pattern: str, n_ch: int, local_idx: int) -> tuple[np.ndarray, np.ndarray]:
