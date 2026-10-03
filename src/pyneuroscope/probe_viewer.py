@@ -19,6 +19,7 @@ class ProbeViewer(QWidget):
         self._groups: list[ChannelGroup] = []
         self._bad_channels: set[int] = set()
         self._channel_colors: dict[int, str] = {}
+        self._white_channels = False
         self._channel_geometry: dict[int, ProbeSitePosition] = {}
         self._dot_hits: dict[int, tuple[float, float, float]] = {}
         self._visible_groups: set[int] = set()
@@ -47,6 +48,7 @@ class ProbeViewer(QWidget):
         physical_sites: list[ProbeSitePosition] | None = None,
         active_channels: set[int] | None = None,
         selected_channels: set[int] | None = None,
+        white_channels: bool = False,
     ) -> None:
         if dict(channel_geometry or {}) != self._channel_geometry or list(physical_sites or []) != self._physical_sites or n_channels != self._n_channels:
             self.reset_view()
@@ -54,6 +56,7 @@ class ProbeViewer(QWidget):
         self._groups = list(groups)
         self._bad_channels = set(bad_channels)
         self._channel_colors = dict(channel_colors)
+        self._white_channels = white_channels
         self._channel_geometry = dict(channel_geometry or {})
         self._physical_sites = list(physical_sites or [])
         self._active_channels = None if active_channels is None else set(active_channels)
@@ -118,18 +121,18 @@ class ProbeViewer(QWidget):
 
             for row, channel in enumerate(group.channels):
                 y = header + row_step * (row + 0.5)
-                color = QColor("#5f6670") if channel in self._bad_channels else QColor(self._channel_colors.get(channel, "#ff00ff"))
+                color = self._channel_color(channel)
                 if not is_visible or self._selected_channels is not None and channel not in self._selected_channels:
                     color.setAlpha(70)
                 painter.setBrush(color)
                 pen = QPen(QColor("#c3ccd8") if channel in self._bad_channels else QColor("#12161c"))
                 if not is_visible:
                     pen.setColor(QColor("#3a4049"))
-                pen.setWidth(2 if channel in self._bad_channels else 1)
+                pen.setWidthF((2 if channel in self._bad_channels else 1) / self._zoom)
                 painter.setPen(pen)
                 painter.drawEllipse(QPointF(x_center, y), radius, radius)
                 self._dot_hits[channel] = (x_center, y, radius + 5)
-                painter.setPen(QPen(QColor("#b8c7da") if is_visible else QColor("#616977")))
+                painter.setPen(QPen(self._channel_label_color(is_visible)))
                 painter.drawText(
                     QRectF(x_center + radius + 3, y - 8, max(24, column_width / 2), 16),
                     Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -218,7 +221,7 @@ class ProbeViewer(QWidget):
                     continue
                 x = x_origin + (position.x - min_x) * x_scale
                 y = y_origin + ((max_y - position.y) if self._physical_sites else (position.y - min_y)) * y_scale
-                color = QColor("#5f6670") if channel in self._bad_channels else QColor(self._channel_colors.get(channel, "#ff00ff"))
+                color = self._channel_color(channel)
                 active = self._active_channels is None or channel in self._active_channels
                 if not active:
                     color = QColor("#343b45")
@@ -228,28 +231,42 @@ class ProbeViewer(QWidget):
                 pen = QPen(QColor("#c3ccd8") if channel in self._bad_channels else QColor("#12161c"))
                 if not is_visible:
                     pen.setColor(QColor("#3a4049"))
-                pen.setWidth(2 if channel in self._bad_channels else 1)
+                pen.setWidthF((2 if channel in self._bad_channels else 1) / self._zoom)
                 painter.setPen(pen)
                 painter.drawEllipse(QPointF(x, y), radius, radius)
                 if active:
                     self._dot_hits[channel] = (x, y, radius + 3 / self._zoom)
                 if show_labels and active:
                     painter.save()
+                    # Keep font rendering independent of geometry magnification.
+                    painter.resetTransform()
                     font = painter.font()
-                    font.setPointSizeF(max(0.1, 9.0 / self._zoom))
+                    font.setPointSizeF(9.0)
                     painter.setFont(font)
-                    painter.setPen(QPen(QColor("#b8c7da") if is_visible else QColor("#616977")))
-                    label_left = x + radius + 3 / self._zoom
+                    painter.setPen(QPen(self._channel_label_color(is_visible)))
+                    label_left = (x + radius) * self._zoom + self._pan.x() + 3
                     alignment = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
-                    if label_left * self._zoom + self._pan.x() + 32 > self.width():
-                        label_left = x - radius - 35 / self._zoom
+                    if label_left + 32 > self.width():
+                        label_left = (x - radius) * self._zoom + self._pan.x() - 35
                         alignment = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
                     painter.drawText(
-                        QRectF(label_left, y - 8 / self._zoom, 32 / self._zoom, 16 / self._zoom),
+                        QRectF(label_left, y * self._zoom + self._pan.y() - 8, 32, 16),
                         alignment,
                         str(channel),
                     )
                     painter.restore()
+
+    def _channel_color(self, channel: int) -> QColor:
+        if channel in self._bad_channels:
+            return QColor("#5f6670")
+        if self._white_channels:
+            return QColor("#ffffff")
+        return QColor(self._channel_colors.get(channel, "#ff00ff"))
+
+    def _channel_label_color(self, visible: bool) -> QColor:
+        if not visible:
+            return QColor("#616977")
+        return QColor("#ffffff" if self._white_channels else "#b8c7da")
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         if event.button() in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton):
@@ -277,7 +294,7 @@ class ProbeViewer(QWidget):
         if self._physical_sites and not self._channel_geometry:
             painter.setPen(QPen(QColor("#aab5c4")))
             painter.drawText(QRectF(8, self.height() - 30, self.width() - 16, 24),
-                             Qt.AlignmentFlag.AlignCenter, "Load recording map for active sites")
+                             Qt.AlignmentFlag.AlignCenter, "Load active channel map for active sites")
         if self._drag_start is not None and self._drag_current is not None:
             rect = QRectF(self._drag_start, self._drag_current).normalized()
             painter.setBrush(Qt.BrushStyle.NoBrush)

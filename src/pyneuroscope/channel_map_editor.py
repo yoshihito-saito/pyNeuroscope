@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QDialog,
@@ -71,7 +71,12 @@ class GroupDesignWidget(QWidget):
         self.channel_colors = channel_colors or {}
         self.display_name = display_name or design.name
         self._hits: dict[int, tuple[float, float, float]] = {}
+        self._zoom = 1.0
+        self._pan = QPointF()
+        self._pan_start = None
+        self._pan_origin = QPointF()
         self.setMinimumHeight(420)
+        self.setToolTip("Wheel: zoom / Right or middle drag: pan / Reset view: restore position and zoom / Left click: edit channel")
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -84,11 +89,14 @@ class GroupDesignWidget(QWidget):
         height = max(1, self.height() - margin - header)
         row_step = height / max(1, self.design.channels_per_group)
         x = self.width() * 0.45
-        radius = max(6.0, min(14.0, row_step * 0.3, self.width() * 0.045))
+        radius = max(0.6, min(14.0, row_step * 0.3, self.width() * 0.045)) / max(1.0, self._zoom ** 0.5)
 
         painter.setPen(QPen(QColor("#d6dde8")))
         painter.drawText(0, 2, self.width(), header, Qt.AlignmentFlag.AlignCenter, self.display_name)
-        painter.setPen(QPen(QColor("#2d333d")))
+        painter.setClipRect(QRectF(0, header, self.width(), self.height() - header))
+        painter.translate(self._pan)
+        painter.scale(self._zoom, self._zoom)
+        painter.setPen(QPen(QColor("#2d333d"), 1.0 / self._zoom))
         painter.drawLine(int(x), header, int(x), self.height() - margin)
 
         for slot in range(self.design.channels_per_group):
@@ -98,23 +106,65 @@ class GroupDesignWidget(QWidget):
             color = QColor("#3a414d") if channel is None else QColor(self.channel_colors.get(channel, "#ff00ff"))
             painter.setBrush(color)
             pen = QPen(QColor("#ff3333") if invalid else QColor("#c3ccd8"))
-            pen.setWidth(2 if invalid else 1)
+            pen.setWidthF((2 if invalid else 1) / self._zoom)
             painter.setPen(pen)
             painter.drawEllipse(QPointF(x, y), radius, radius)
 
-            label = "" if channel is None else str(channel)
-            painter.setPen(QPen(QColor("#d6dde8")))
-            painter.drawText(
-                int(x + radius + 8),
-                int(y - 8),
-                max(42, int(self.width() - x - radius - 14)),
-                16,
-                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                label,
-            )
-            self._hits[slot] = (x, y, radius + 6)
+            if row_step * self._zoom >= 12:
+                painter.save()
+                # Draw labels in screen coordinates: tiny font sizes under a
+                # large transform can crash Windows font rendering.
+                painter.resetTransform()
+                font = painter.font()
+                font.setPointSizeF(9.0)
+                painter.setFont(font)
+                painter.setPen(QPen(QColor("#d6dde8")))
+                painter.drawText(
+                    QRectF(x * self._zoom + self._pan.x() + radius * self._zoom + 8,
+                           y * self._zoom + self._pan.y() - 8,
+                           max(42, self.width() - x - radius - 14), 16),
+                    Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                    "" if channel is None else str(channel),
+                )
+                painter.restore()
+            self._hits[slot] = (x * self._zoom + self._pan.x(), y * self._zoom + self._pan.y(), radius * self._zoom + 6)
+
+    def zoom_by(self, factor: float, anchor: QPointF | None = None) -> None:
+        anchor = anchor if anchor is not None else QPointF(self.width() * 0.45, self.height() * 0.5)
+        zoom = max(0.25, min(100.0, self._zoom * factor))
+        self._pan = anchor - (anchor - self._pan) * (zoom / self._zoom)
+        self._zoom = zoom
+        self.update()
+
+    def reset_view(self) -> None:
+        self._zoom = 1.0
+        self._pan = QPointF()
+        self._pan_start = None
+        self.update()
+
+    def wheelEvent(self, event) -> None:  # noqa: N802
+        delta = event.angleDelta().y()
+        if delta:
+            self.zoom_by(1.2 ** (delta / 120.0), event.position())
+            event.accept()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._pan_start is not None:
+            self._pan = self._pan_origin + event.position() - self._pan_start
+            self.update()
+            event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton):
+            self._pan_start = None
+            event.accept()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
+        if event.button() in (Qt.MouseButton.RightButton, Qt.MouseButton.MiddleButton):
+            self._pan_start = event.position()
+            self._pan_origin = QPointF(self._pan)
+            event.accept()
+            return
         if event.button() != Qt.MouseButton.LeftButton:
             return
         slot = self._slot_at(event.position().x(), event.position().y())
@@ -164,13 +214,24 @@ class GroupTab(QWidget):
         controls.addWidget(QLabel("channels/group"))
         controls.addWidget(self.channels_per_group)
         controls.addStretch(1)
+        self.zoom_out = QPushButton("−")
+        self.zoom_out.setToolTip("Zoom out")
+        self.zoom_out.clicked.connect(lambda: self.viewer.zoom_by(1 / 1.2))
+        self.zoom_in = QPushButton("+")
+        self.zoom_in.setToolTip("Zoom in")
+        self.zoom_in.clicked.connect(lambda: self.viewer.zoom_by(1.2))
+        self.reset_view = QPushButton("Reset view")
+        self.reset_view.clicked.connect(self.viewer.reset_view)
+        controls.addWidget(self.zoom_out)
+        controls.addWidget(self.zoom_in)
+        controls.addWidget(self.reset_view)
         layout.addLayout(controls)
         layout.addWidget(self.viewer, 1)
         self.channels_per_group.valueChanged.connect(self._resize_design)
 
     def _resize_design(self) -> None:
         self.design.resize(self.channels_per_group.value())
-        self.viewer.update()
+        self.viewer.reset_view()
 
 
 class ChannelMapDialog(QDialog):
@@ -245,6 +306,8 @@ class ChannelMapDialog(QDialog):
                 [
                     "Each tab is one group/shank.",
                     "Click a site to set its channel number.",
+                    "Use the wheel or − / + to zoom; right or middle drag to pan.",
+                    "Use Reset view to restore the initial position and zoom.",
                     "Use channels/group to change how many sites are shown in the current group.",
                     "Use + Group or Remove Group to change the number of groups.",
                     "Press Apply when the channel layout matches your probe.",

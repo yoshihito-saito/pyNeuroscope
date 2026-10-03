@@ -22,8 +22,8 @@ It is designed for quick visual checks of `amplifier.dat`, explicitly selected `
 - Display complete Neuropixels 1.0, 2.0 single-shank, and 2.0 four-shank site
   layouts, with selected physical site IDs mapped to DAT channel order.
 - Zoom the probe map with the wheel, pan with right/middle drag, and left-drag
-  a rectangle to show only the enclosed active channels. `Show all channels`
-  clears the display selection; `Fit probe` resets the map view.
+  a rectangle to show only the enclosed active channels. Double-click clears
+  the display selection.
 - Choose `per probe` color mode and set an independent colormap for each probe.
 - Mark bad channels and save them as `skip="1"` in XML.
 - Apply channel colors with selectable color maps.
@@ -85,9 +85,10 @@ probe type.
 Choose a Neuropixels probe type and set `nChannels` to the number of DAT columns
 for that probe. The full physical layout is bundled; selecting a type does not
 invent an active recording map. Load the recorded selection using each probe's
-`Recording map`. This does not configure the acquisition hardware.
+`Load active channel map` (shown only for Neuropixels types).
+This does not configure the acquisition hardware.
 
-Each probe's `Recording map` accepts `neuropixels_probeN_metadata.json`
+Each probe's `Load active channel map` accepts `neuropixels_probeN_metadata.json`
 (WILDX applied probe receipt version 1), an `.imro` file, a probe-local
 `chanMap.mat`, Atlaxis `chanCoords.channelInfo.mat`, or an explicit JSON map.
 Neuropixels metadata and IMRO automatically set that probe's type and 384 DAT
@@ -141,6 +142,13 @@ limits are in ADC counts relative to each channel's median. Each time pixel keep
 the strongest signed excursion in its sample bin, and missing bins are transparent. Bitmap images are cached; the
 original and processed sample arrays are unchanged. Time/row zoom and event or
 spike overlays remain available. CSD overlay is available in trace mode.
+In bitmap mode, Ch map shows active channel dots and labels in white; bad,
+inactive, and unselected channels retain their status indicators. Switching
+back to trace restores the cmap colors.
+
+`Edit Channel Groups` supports wheel zoom and − / + buttons, right/middle-drag
+panning, and `Reset view` to restore the initial position and magnification.
+Channel ID editing follows the displayed site positions after zoom/pan.
 
 `Color mode` selects the cmap controls shown below it: one `Color map` for
 `all`/`group`, or individual selectors for `per probe`/`per region`. Switching

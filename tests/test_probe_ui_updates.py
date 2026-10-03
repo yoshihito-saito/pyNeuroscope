@@ -158,3 +158,75 @@ def test_ctrl_drag_adds_disjoint_range_and_plain_drag_replaces_after_zoom(app):
         assert selected[-1] == {3}
     finally:
         v.close()
+
+
+def test_bitmap_map_uses_white_preserving_bad_selection_and_trace_colors(app):
+    w = MainWindow()
+    try:
+        w.bad_channels = {1}
+        w._select_probe_channels({0, 1})
+        original = dict(w.channel_colors)
+        w.display_mode.setCurrentText("bitmap")
+        v = w.probe_viewer
+        image = v.grab().toImage()
+        def dot(ch):
+            x, y, _ = v._dot_hits[ch]
+            return image.pixelColor(round(x), round(y)).name()
+        assert dot(0) == "#ffffff"
+        assert dot(1) == "#5f6670"
+        assert dot(2) != "#ffffff"
+        assert w.channel_colors == original
+        w.display_mode.setCurrentText("trace")
+        image = v.grab().toImage()
+        assert dot(0) == original[0]
+        assert dot(1) == "#5f6670"
+        assert w.selected_channels == {0, 1}
+    finally:
+        w.close()
+
+
+def test_bitmap_physical_geometry_shows_active_white_and_inactive_gray(app):
+    v = ProbeViewer()
+    try:
+        v.resize(400, 600)
+        points = [ProbeSitePosition(0, 0), ProbeSitePosition(0, 20), ProbeSitePosition(0, 40)]
+        v.set_probe(3, [ChannelGroup("g", [0, 1, 2])], {2}, {0: "#ff0000", 1: "#00ff00", 2: "#0000ff"},
+                    channel_geometry=dict(enumerate(points)), physical_sites=points,
+                    active_channels={0, 2}, white_channels=True)
+        image = v.grab().toImage()
+        for ch, color in [(0, "#ffffff"), (2, "#5f6670")]:
+            x, y, _ = v._dot_hits[ch]
+            assert image.pixelColor(round(x), round(y)).name() == color
+        assert 1 not in v._dot_hits
+        # The disconnected site in the middle keeps its inactive fill.
+        x0, y0, _ = v._dot_hits[0]
+        x2, y2, _ = v._dot_hits[2]
+        assert image.pixelColor(round((x0 + x2) / 2), round((y0 + y2) / 2)).name() == "#343b45"
+        v._zoom = 20
+        v._pan = QPointF(x0, y0) * (1 - v._zoom)
+        image = v.grab().toImage()
+        x, y, _ = v._dot_hits[0]
+        assert image.pixelColor(round(x), round(y)).name() == "#ffffff"
+    finally:
+        v.close()
+
+
+def test_active_map_button_only_for_neuropixels_and_navigation_removed(app, monkeypatch):
+    w = MainWindow()
+    try:
+        from pyneuroscope.probe_geometry import neuropixels_specs
+        calls = []
+        monkeypatch.setattr(w, "_load_probe_channel_map", calls.append)
+        for probe_type in ["", "linear", *neuropixels_specs()]:
+            w._probe_type_changed(0, probe_type)
+            row = w.probe_rows_layout.itemAt(0).widget()
+            buttons = {b.text(): b for b in row.findChildren(QPushButton)}
+            assert "Update XML" in buttons
+            assert ("Load active channel map" in buttons) == (probe_type in neuropixels_specs())
+            if probe_type in neuropixels_specs():
+                buttons["Load active channel map"].click()
+                assert calls[-1] == 0
+        right_buttons = [b.text() for b in w.color_mode.parentWidget().findChildren(QPushButton)]
+        assert "Show all channels" not in right_buttons and "Fit probe" not in right_buttons
+    finally:
+        w.close()

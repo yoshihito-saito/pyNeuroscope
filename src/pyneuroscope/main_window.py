@@ -60,6 +60,7 @@ from .probe_geometry import (
     find_chanmap_file,
     load_chanmap_geometry,
     load_probe_geometry,
+    neuropixels_specs,
     load_recording_channel_map,
     RecordingChannelMap,
     parse_recording_channel_map,
@@ -458,11 +459,6 @@ class MainWindow(QMainWindow):
             row_layout.addLayout(title_row)
             row_layout.addLayout(controls)
             row_layout.addLayout(type_row)
-            map_row = QHBoxLayout()
-            load_map = QPushButton("Recording map")
-            load_map.setToolTip("Load this probe's Neuropixels metadata JSON, IMRO, or MAT/JSON channel map")
-            load_map.clicked.connect(lambda checked=False, probe_index=index: self._load_probe_channel_map(probe_index))
-            map_row.addWidget(load_map)
             geometry = load_probe_geometry(probe.probe_type) if probe.probe_type else None
             if geometry is not None and geometry.physical_sites:
                 state = f"{len(probe.channel_map.active_channels)} active" if probe.channel_map is not None else "active map not set"
@@ -471,7 +467,11 @@ class MainWindow(QMainWindow):
                 note.setWordWrap(True)
                 note.setToolTip(geometry.note)
                 row_layout.addWidget(note)
-            row_layout.addLayout(map_row)
+            if probe.probe_type in neuropixels_specs():
+                load_map = QPushButton("Load active channel map")
+                load_map.setToolTip("Load this probe's Neuropixels metadata JSON, IMRO, or MAT/JSON channel map")
+                load_map.clicked.connect(lambda checked=False, probe_index=index: self._load_probe_channel_map(probe_index))
+                row_layout.addWidget(load_map)
             if probe.xml_path is not None:
                 loaded = QLabel(probe.xml_path.name)
                 loaded.setWordWrap(True)
@@ -576,13 +576,13 @@ class MainWindow(QMainWindow):
     def _load_probe_channel_map(self, probe_index: int) -> None:
         selected = Path(self.dat_path.text().strip()) if self.dat_path.text().strip() else None
         start = str(selected if selected.is_dir() else selected.parent) if selected is not None else ""
-        path, _ = QFileDialog.getOpenFileName(self, f"Recording map for Probe {probe_index + 1}", start,
+        path, _ = QFileDialog.getOpenFileName(self, f"Active channel map for Probe {probe_index + 1}", start,
                                              "Recording maps (*.imro *.json *.mat);;Neuropixels metadata (*.json);;IMRO (*.imro);;MAT channel maps (*.mat);;All files (*)")
         if path:
             try:
                 self._set_probe_channel_map(probe_index, load_recording_channel_map(path))
             except ProbeGeometryError as exc:
-                QMessageBox.critical(self, "Recording map", str(exc))
+                QMessageBox.critical(self, "Active channel map", str(exc))
 
     def _set_probe_channel_map(self, index: int, mapping: RecordingChannelMap) -> None:
         probe = self.probes[index]
@@ -1100,14 +1100,6 @@ class MainWindow(QMainWindow):
         self.probe_cmap_panel.setVisible(False)
         self._refresh_probe_cmap_controls()
         layout.addWidget(self.channel_tabs, 1)
-        probe_navigation = QHBoxLayout()
-        show_all = QPushButton("Show all channels")
-        show_all.clicked.connect(lambda: self._select_probe_channels(None))
-        fit = QPushButton("Fit probe")
-        fit.clicked.connect(self.probe_viewer.reset_view)
-        probe_navigation.addWidget(show_all)
-        probe_navigation.addWidget(fit)
-        layout.addLayout(probe_navigation)
         layout.addLayout(color_mode_row)
         layout.addWidget(self.color_map_panel)
         layout.addWidget(self.region_cmap_panel)
@@ -1564,7 +1556,7 @@ class MainWindow(QMainWindow):
         try:
             mapping = load_recording_channel_map(chanmap_path)
             if mapping.probe_type:
-                raise ProbeGeometryError("Neuropixels metadata and IMRO describe one probe. Use that probe's Recording map button.")
+                raise ProbeGeometryError("Neuropixels metadata and IMRO describe one probe. Select a Neuropixels type and use that probe's Load active channel map button.")
             geometry = mapping.positions
             offset = 0
             for probe in self.probes:
@@ -2966,6 +2958,7 @@ class MainWindow(QMainWindow):
             physical_sites=physical_sites,
             active_channels=active_channels,
             selected_channels=self.selected_channels,
+            white_channels=self.display_mode.currentText() == "bitmap",
         )
         if self._is_channel_profile_tab_active():
             self._refresh_channel_profile()
