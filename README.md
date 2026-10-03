@@ -17,6 +17,14 @@ It is designed for quick visual checks of `amplifier.dat`, explicitly selected `
 - Adjust trace scale, row spacing, bandpass filtering, and common-average reference.
 - Display multi-subsession recordings with session epoch boundaries and overview labels.
 - Edit channel groups and inspect groups in the probe viewer.
+- Open channel-group XML templates without sampling rates, set the recording
+  rates in the GUI, and use `Update XML` for an individual probe.
+- Display complete Neuropixels 1.0, 2.0 single-shank, and 2.0 four-shank site
+  layouts, with selected physical site IDs mapped to DAT channel order.
+- Zoom the probe map with the wheel, pan with right/middle drag, and left-drag
+  a rectangle to show only the enclosed active channels. `Show all channels`
+  clears the display selection; `Fit probe` resets the map view.
+- Choose `per probe` color mode and set an independent colormap for each probe.
 - Mark bad channels and save them as `skip="1"` in XML.
 - Apply channel colors with selectable color maps.
 - Load an existing `SleepState.states.mat` file and edit Wake / NREM / REM labels in the GUI.
@@ -65,6 +73,42 @@ Saved XML includes the core fields expected by neurocode and preprocessing tools
 ```
 
 When loading an existing XML file, pyNeuroscope preserves acquisition values such as `nBits`, `voltageRange`, `amplification`, and `offset` when saving again.
+
+XML templates may omit `samplingRate` and `lfpSamplingRate`. Loading a template
+keeps the current GUI rates and displays a reminder to set the actual recording
+rates. `Update XML` writes probe-local channel IDs; `Save Session XML` writes
+the combined recording-channel IDs. Missing metadata is not inferred from the
+probe type.
+
+## Neuropixels maps
+
+Choose a Neuropixels probe type and set `nChannels` to the number of DAT columns
+for that probe. The full physical layout is bundled; selecting a type does not
+invent an active recording map. Use `Active site IDs` to enter one physical site
+ID per DAT channel, in DAT column order. For NP1 and NP2 single shank, use
+zero-based site numbers, e.g. `384, 385, ...`. For NP2 four shank, use zero-based
+`shank:site` IDs, e.g. `0:0, 2:512, ...`. This order must match what the recording
+software actually saved. It does not configure the acquisition hardware.
+
+`Recording map` loads a probe-local `chanMap.mat`, Atlaxis
+`chanCoords.channelInfo.mat`, or an explicit JSON map. `Load Session ChannelMap`
+uses combined DAT channel IDs. Unknown/disconnected rows retain their original
+channel numbering. Active/connected flags are separate from bad-channel marking
+and the temporary display selection. Double-clicking a channel still toggles
+its bad-channel status.
+
+Updating probe XML or saving session XML saves a `.probes.json` companion.
+Keep this file alongside its XML to restore probe
+types, maps, and probe colormaps. Adjacent Atlaxis `.chanCoords.channelInfo.mat`
+companions are also loaded. Rectangle selections are temporary and are not
+saved into XML channel groups or bad-channel flags. NP2's 200 µm
+tip-to-first-site offset follows Atlaxis and is provisional.
+
+Waveform drawing uses peak-preserving display envelopes and cached Qt paths and
+images. The original samples remain available to filtering, spectra, and other
+analysis. To compare synthetic offscreen drawing with a Git revision, run
+`python tools/benchmark_trace_rendering.py --baseline main`; this excludes file
+reading and filtering.
 
 ## Install
 

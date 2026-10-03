@@ -7,10 +7,12 @@ from PySide6.QtCore import QPoint, QPointF, QRect, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
 from matplotlib import colormaps
+from pyqtgraph import arrayToQPath
 
 from .csd import CSD_COLORMAPS, robust_csd_limits, standard_1d_csd
 from .models import SignalEventOverlay, SignalSpikeOverlay
 from .signal_layout import TraceLayoutItem
+from .trace_display import peak_envelope_indices, trace_statistics
 
 
 TRACE_DISPLAY_SAMPLES_PER_PIXEL_SINGLE_COLUMN = 0.5
@@ -41,6 +43,10 @@ class SignalViewer(QWidget):
         self._show_csd = False
         self._csd_colormap_name = CSD_COLORMAPS[0]
         self._csd_color_lut = self._build_colormap_lut(self._csd_colormap_name)
+        self._trace_cache: dict[int, tuple[np.ndarray, np.ndarray, float, float]] = {}
+        self._trace_cache_key = None
+        self._path_cache: dict[int, tuple[tuple, QPainterPath]] = {}
+        self._trace_image_cache = None
         self.setMinimumHeight(360)
         self.setMinimumWidth(520)
         self.setAutoFillBackground(True)
@@ -56,6 +62,11 @@ class SignalViewer(QWidget):
         show_channel_labels: bool = True,
         epoch_boundaries: Sequence[float] | None = None,
     ) -> None:
+        if data is not self._data or time_seconds is not self._time_seconds:
+            self._trace_cache_key = None
+            self._trace_cache.clear()
+            self._path_cache.clear()
+            self._trace_image_cache = None
         self._time_seconds = time_seconds
         self._data = data
         self._layout_items = list(layout_items)
@@ -157,11 +168,13 @@ class SignalViewer(QWidget):
         start_index, end_index = self._visible_sample_bounds(data.shape[0])
         visible_data = data[start_index:end_index]
         visible_time = self._time_seconds[start_index:end_index]
-        csd_data = self._csd_display_data(visible_data, visible_time, max_points)
-        step = max(1, visible_data.shape[0] // max_points)
-        sampled_data = visible_data[::step]
-        sampled_time = visible_time[::step]
-        x_values = _normalized_time_fractions(sampled_time, visible_time)
+        csd_data = self._csd_display_data(visible_data, visible_time, max_points) if self._show_csd else visible_data
+        cache_key = (start_index, end_index, max_points)
+        if cache_key != self._trace_cache_key:
+            self._trace_cache_key = cache_key
+            self._trace_cache.clear()
+            self._path_cache.clear()
+            self._trace_image_cache = None
         trace_pen_width = self._trace_pen_width(visible_time, trace_width, columns=columns)
         item_geometries: dict[int, tuple[float, float, float, float, float, float]] = {}
 
@@ -193,7 +206,27 @@ class SignalViewer(QWidget):
                 below=False,
             )
 
-        for item in visible_items:
+        layer_key = (cache_key, width, height, tuple(visible_items), self._vertical_scale,
+                     self._show_channel_labels, self._background_mode, trace_pen_width, bottom_overlay_height)
+        cached_layer = self._trace_image_cache
+        layer = None
+        if cached_layer is not None and cached_layer[0] == layer_key:
+            painter.drawImage(0, 0, cached_layer[1])
+            item_geometries = cached_layer[2]
+            draw_items = []
+            trace_painter = painter
+        else:
+            draw_items = visible_items
+            # Bound cache memory for very tall scrollable widgets.
+            if width * height * 4 <= 64 * 1024 * 1024:
+                layer = QImage(width, height, QImage.Format.Format_ARGB32_Premultiplied)
+                layer.fill(Qt.GlobalColor.transparent)
+                trace_painter = QPainter(layer)
+            else:
+                self._trace_image_cache = None
+                trace_painter = painter
+
+        for item in draw_items:
             if item.channel < 0 or item.channel >= data.shape[1]:
                 continue
             rows = max(1, rows_by_column[item.column])
@@ -201,32 +234,32 @@ class SignalViewer(QWidget):
             column_x0 = margin_left + item.column * column_width
             trace_x0 = column_x0 + label_gutter
             y_center = margin_top + (item.row + 0.5) * trace_height
-            trace = sampled_data[:, item.channel].astype(np.float64)
-            if trace.size == 0:
+            if visible_data.shape[0] == 0:
                 continue
-            centered = trace - float(np.median(trace))
-            peak = float(np.percentile(np.abs(centered), 98)) or 1.0
-            normalized = centered / peak
-            normalized = normalized * self._vertical_scale
-            item_geometries[item.channel] = (trace_x0, trace_width, y_center, trace_height, float(np.median(trace)), peak)
-
-            path = QPainterPath()
-            path.moveTo(QPointF(trace_x0, y_center - normalized[0] * trace_height * 0.35))
-            for x_norm, y_norm in zip(x_values[1:], normalized[1:]):
-                x = trace_x0 + x_norm * trace_width
-                y = y_center - y_norm * trace_height * 0.35
-                path.lineTo(QPointF(x, y))
+            x_values, normalized, center, peak = self._display_trace(item.channel, visible_data, visible_time, max_points)
+            item_geometries[item.channel] = (trace_x0, trace_width, y_center, trace_height, center, peak)
+            path_key = (cache_key, trace_x0, trace_width, y_center, trace_height, self._vertical_scale)
+            cached = self._path_cache.get(item.channel)
+            if cached is None or cached[0] != path_key:
+                path = arrayToQPath(
+                    trace_x0 + x_values * trace_width,
+                    y_center - normalized * self._vertical_scale * trace_height * 0.35,
+                    connect="finite",
+                )
+                self._path_cache[item.channel] = (path_key, path)
+            else:
+                path = cached[1]
 
             pen = QPen(QColor("#5f6670") if item.is_bad else QColor(item.color))
             pen.setWidthF(trace_pen_width)
-            painter.setPen(pen)
-            painter.drawPath(path)
+            trace_painter.setPen(pen)
+            trace_painter.drawPath(path)
             if self._show_channel_labels and trace_height >= 5.0 and label_gutter >= 28:
                 font = QFont()
                 font.setPointSize(max(6, min(9, int(trace_height * 0.7))))
-                painter.setFont(font)
-                painter.setPen(QPen(self._color("muted") if item.is_bad else self._color("label")))
-                painter.drawText(
+                trace_painter.setFont(font)
+                trace_painter.setPen(QPen(self._color("muted") if item.is_bad else self._color("label")))
+                trace_painter.drawText(
                     int(column_x0 + 2),
                     int(y_center - trace_height * 0.45),
                     label_gutter - 6,
@@ -234,6 +267,11 @@ class SignalViewer(QWidget):
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
                     f"ch {item.channel}",
                 )
+
+        if layer is not None:
+            trace_painter.end()
+            self._trace_image_cache = (layer_key, layer, item_geometries)
+            painter.drawImage(0, 0, layer)
 
         if visible_time.size >= 2 and self._epoch_boundaries.size:
             self._draw_epoch_boundaries(
@@ -302,6 +340,20 @@ class SignalViewer(QWidget):
             painter.fillRect(rect, QColor(120, 160, 220, 55))
             painter.setPen(QPen(QColor("#7aa7ff")))
             painter.drawRect(rect)
+
+    def _display_trace(self, channel, data, time, max_points):
+        cached = self._trace_cache.get(channel)
+        if cached is None:
+            values = data[:, channel]
+            indices = peak_envelope_indices(values, max_points)
+            # Match the existing viewer's representative-sample auto scaling.
+            # Only the display envelope uses full-window extrema.
+            step = max(1, len(values) // max(2, max_points))
+            center, peak = trace_statistics(values[::step])
+            cached = (_normalized_time_fractions(time[indices], time),
+                      (values[indices].astype(np.float64) - center) / peak, center, peak)
+            self._trace_cache[channel] = cached
+        return cached
 
     def _color(self, role: str) -> QColor:
         if self._background_mode == "white":
@@ -379,6 +431,8 @@ class SignalViewer(QWidget):
         if not np.isfinite(dt) or dt <= 0 or not np.isfinite(span) or span <= 0:
             return 1.1
         samples_per_pixel = max(1e-9, (span / dt) / width)
+        if samples_per_pixel >= 8 and (int(columns) <= 1 or self._vertical_scale <= 1.0):
+            return 1.0
         zoom_detail = max(1.0, 8.0 / samples_per_pixel)
         scale_bonus = 0.0
         max_width = 1.95

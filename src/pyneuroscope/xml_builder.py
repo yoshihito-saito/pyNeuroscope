@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import math
 from xml.dom import minidom
 from xml.etree import ElementTree as ET
 
@@ -114,13 +115,19 @@ def parse_neurosuite_xml(path_or_text: str | Path) -> tuple[RecordingMetadata, l
 
     metadata = RecordingMetadata(
         n_channels=_int_text(acquisition, "nChannels", required=True),
-        sampling_rate=_float_text(acquisition, "samplingRate", required=True),
+        sampling_rate=_float_text(acquisition, "samplingRate", default=0.0),
         lfp_sampling_rate=_float_text(field_potentials, "lfpSamplingRate", default=0.0),
         n_bits=_int_text(acquisition, "nBits", default=None),
         voltage_range=_float_text(acquisition, "voltageRange", default=None),
         amplification=_float_text(acquisition, "amplification", default=None),
         offset=_float_text(acquisition, "offset", default=0.0),
     )
+
+    for parent, tag in [(acquisition, "samplingRate"), (field_potentials, "lfpSamplingRate")]:
+        if _find_text(parent, tag, required=False) is not None:
+            value = _float_text(parent, tag)
+            if not math.isfinite(value) or value <= 0:
+                raise XmlError(f"{tag} must be finite and positive")
 
     channel_groups_el = root.find("./anatomicalDescription/channelGroups")
     groups: list[ChannelGroup] = []
@@ -161,7 +168,10 @@ def _root_from_path_or_text(path_or_text: str | Path) -> ET.Element:
 
 def _int_text(parent: ET.Element | None, tag: str, *, required: bool = False, default: int | None = 0) -> int | None:
     value = _find_text(parent, tag, required=required)
-    return int(value) if value is not None else default
+    try:
+        return int(value) if value is not None else default
+    except ValueError as exc:
+        raise XmlError(f"Invalid {tag}: {value}") from exc
 
 
 def _float_text(
@@ -172,7 +182,10 @@ def _float_text(
     default: float | None = 0.0,
 ) -> float | None:
     value = _find_text(parent, tag, required=required)
-    return float(value) if value is not None else default
+    try:
+        return float(value) if value is not None else default
+    except ValueError as exc:
+        raise XmlError(f"Invalid {tag}: {value}") from exc
 
 
 def _find_text(parent: ET.Element | None, tag: str, *, required: bool) -> str | None:

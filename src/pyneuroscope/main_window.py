@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import re
+import json
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from importlib.resources import files
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer
@@ -29,6 +30,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QSplitter,
     QTabWidget,
+    QTextEdit,
     QVBoxLayout,
     QWidget,
 )
@@ -57,6 +59,10 @@ from .probe_geometry import (
     find_chanmap_file,
     load_chanmap_geometry,
     load_probe_geometry,
+    load_recording_channel_map,
+    selected_site_map,
+    RecordingChannelMap,
+    parse_recording_channel_map,
 )
 from .probe_viewer import ProbeViewer
 from .recording_overview import RecordingOverviewWidget
@@ -77,6 +83,9 @@ class ProbeConfig:
     groups: list[ChannelGroup] | None = None
     bad_channels: set[int] = field(default_factory=set)
     probe_type: str = ""
+    cmap: str = "spring"
+    channel_map: RecordingChannelMap | None = None
+    metadata: RecordingMetadata | None = None
 
 
 class MainWindow(QMainWindow):
@@ -90,6 +99,9 @@ class MainWindow(QMainWindow):
         self.probes: list[ProbeConfig] = [ProbeConfig(4)]
         self._probe_geometry_names = available_probe_geometries()
         self._chanmap_geometry_path: Path | None = None
+        self._session_map_cache = None
+        self.selected_channels: set[int] | None = None
+        self.probe_cmap_controls: dict[int, QComboBox] = {}
         self.bad_channels: set[int] = set()
         self.visible_groups: set[int] = set()
         self.channel_colors: dict[int, str] = {}
@@ -216,6 +228,8 @@ class MainWindow(QMainWindow):
         self.file_extra_channels.setValue(0)
         self.total_n_channels_label = QLabel("4")
         self.duration_label = QLabel("-")
+        self.xml_settings_note = QLabel("")
+        self.xml_settings_note.setWordWrap(True)
         self.start_minutes = QSpinBox()
         self.start_minutes.setRange(0, 10**7)
         self.start_seconds = QSpinBox()
@@ -259,6 +273,7 @@ class MainWindow(QMainWindow):
         form.addRow("Data type", self.data_dtype)
         form.addRow("ADC channels in file", self.file_extra_channels)
         form.addRow("Duration", self.duration_label)
+        form.addRow(self.xml_settings_note)
 
 
         for widget in [
@@ -387,9 +402,12 @@ class MainWindow(QMainWindow):
             title.setStyleSheet("font-weight: 600; color: #d6dde8;")
             load_xml = QPushButton("Probe XML")
             load_xml.clicked.connect(lambda checked=False, probe_index=index: self._load_probe_xml(probe_index))
+            update_xml = QPushButton("Update XML")
+            update_xml.clicked.connect(lambda checked=False, probe_index=index: self._save_probe_xml(probe_index))
             title_row.addWidget(title)
             title_row.addStretch(1)
             title_row.addWidget(load_xml)
+            title_row.addWidget(update_xml)
             controls = QHBoxLayout()
             controls.setContentsMargins(0, 0, 0, 0)
             controls.setSpacing(5)
@@ -425,12 +443,30 @@ class MainWindow(QMainWindow):
             controls.addWidget(probe_type, 1)
             row_layout.addLayout(title_row)
             row_layout.addLayout(controls)
+            map_row = QHBoxLayout()
+            load_map = QPushButton("Recording map")
+            load_map.clicked.connect(lambda checked=False, probe_index=index: self._load_probe_channel_map(probe_index))
+            map_row.addWidget(load_map)
+            geometry = load_probe_geometry(probe.probe_type) if probe.probe_type else None
+            if geometry is not None and geometry.physical_sites:
+                select_sites = QPushButton("Active site IDs")
+                select_sites.clicked.connect(lambda checked=False, probe_index=index: self._edit_active_sites(probe_index))
+                map_row.addWidget(select_sites)
+                state = f"{len(probe.channel_map.active_channels)} active" if probe.channel_map is not None else "active map not set"
+                suffix = "; tip offset provisional" if "provisional" in geometry.note.lower() else ""
+                note = QLabel(f"{len(geometry.physical_sites)} sites; {state}{suffix}")
+                note.setWordWrap(True)
+                note.setToolTip(geometry.note)
+                row_layout.addWidget(note)
+            row_layout.addLayout(map_row)
             if probe.xml_path is not None:
                 loaded = QLabel(probe.xml_path.name)
                 loaded.setWordWrap(True)
                 row_layout.addWidget(loaded)
             self.probe_rows_layout.addWidget(row_panel)
         self._update_total_n_channels_label()
+        if hasattr(self, "probe_cmap_layout"):
+            self._refresh_probe_cmap_controls()
         if hasattr(self, "remove_probe_button"):
             self.remove_probe_button.setEnabled(len(self.probes) > 1)
 
@@ -457,7 +493,7 @@ class MainWindow(QMainWindow):
         if not (0 <= probe_index < len(self.probes)):
             return
         probe = self.probes[probe_index]
-        self.probes[probe_index] = ProbeConfig(int(value), probe_type=probe.probe_type)
+        self.probes[probe_index] = ProbeConfig(int(value), probe_type=probe.probe_type, cmap=probe.cmap)
         if probe.xml_path is not None:
             self.statusBar().showMessage(f"Cleared Probe {probe_index + 1} XML because nChannels was edited", 5000)
         self._apply_probe_configs_to_model()
@@ -466,13 +502,11 @@ class MainWindow(QMainWindow):
         if not (0 <= probe_index < len(self.probes)):
             return
         probe = self.probes[probe_index]
-        self.probes[probe_index] = ProbeConfig(
-            n_channels=probe.n_channels,
-            xml_path=probe.xml_path,
-            groups=probe.groups,
-            bad_channels=set(probe.bad_channels),
-            probe_type=probe_type,
-        )
+        # An explicit physical-site assignment belongs to its original catalog.
+        mapping = probe.channel_map if probe.probe_type == probe_type or not probe.channel_map or not probe.channel_map.site_ids else None
+        self.probes[probe_index] = replace(probe, probe_type=probe_type, channel_map=mapping)
+        self.selected_channels = None
+        self._refresh_probe_controls()
         self._refresh_viewer_layout()
 
     def _load_probe_xml(self, probe_index: int) -> None:
@@ -505,19 +539,172 @@ class MainWindow(QMainWindow):
             groups=groups,
             bad_channels=bad,
             probe_type=self.probes[probe_index].probe_type,
+            cmap=self.probes[probe_index].cmap,
+            metadata=metadata,
         )
+        self._load_probe_companion(probe_index, xml_path)
         if probe_index == 0:
-            self.sampling_rate.setValue(metadata.sampling_rate)
+            if metadata.sampling_rate > 0:
+                self.sampling_rate.setValue(metadata.sampling_rate)
             if metadata.lfp_sampling_rate > 0:
                 self.lfp_sampling_rate.setValue(metadata.lfp_sampling_rate)
+        self._set_xml_settings_note(metadata)
         self._refresh_probe_controls()
         self._apply_probe_configs_to_model()
         self.statusBar().showMessage(f"Loaded Probe {probe_index + 1} XML: {xml_path.name}", 5000)
 
+    def _set_xml_settings_note(self, metadata: RecordingMetadata) -> None:
+        missing = [name for name, value in [("samplingRate", metadata.sampling_rate),
+                                           ("lfpSamplingRate", metadata.lfp_sampling_rate)] if value <= 0]
+        self.xml_settings_note.setText(
+            f"XML has no {', '.join(missing)}. Set the recording rates above, then Update XML or Save Session XML."
+            if missing else "")
+
+    def _load_probe_channel_map(self, probe_index: int) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, f"Recording map for Probe {probe_index + 1}", "",
+                                             "Channel maps (*.mat *.json);;All files (*)")
+        if path:
+            try:
+                self._set_probe_channel_map(probe_index, load_recording_channel_map(path))
+            except ProbeGeometryError as exc:
+                QMessageBox.critical(self, "Recording map", str(exc))
+
+    def _set_probe_channel_map(self, index: int, mapping: RecordingChannelMap) -> None:
+        probe = self.probes[index]
+        self._validate_probe_mapping(probe, mapping)
+        probe.channel_map = mapping
+        self.selected_channels = None
+        self._refresh_probe_controls()
+        self._refresh_viewer_layout()
+
+    def _validate_probe_mapping(self, probe: ProbeConfig, mapping: RecordingChannelMap) -> None:
+        if any(ch >= probe.n_channels for ch in mapping.positions):
+            raise ProbeGeometryError(f"Map channel IDs must be below probe nChannels ({probe.n_channels})")
+        geometry = load_probe_geometry(probe.probe_type) if probe.probe_type else None
+        if geometry is not None and geometry.physical_sites and mapping.site_ids:
+            if any(site not in geometry.physical_sites for site in mapping.site_ids.values()):
+                raise ProbeGeometryError("Recording map contains site IDs outside the selected probe type")
+            if any(mapping.positions[ch] != geometry.physical_sites[site] for ch, site in mapping.site_ids.items()):
+                raise ProbeGeometryError("Recording map coordinates disagree with the selected physical site IDs")
+        if geometry is not None and geometry.physical_sites:
+            known_positions = set(geometry.physical_sites.values())
+            if any(position not in known_positions for position in mapping.positions.values()):
+                raise ProbeGeometryError("Map coordinates do not match this physical layout. Use Active site IDs in DAT order, or matching probe-local coordinates.")
+
+    def _load_probe_companion(self, index: int, xml_path: Path) -> None:
+        candidates = [xml_path.with_suffix(".probes.json"), xml_path.with_suffix(".channelmap.json"),
+                      xml_path.with_suffix(".chanCoords.channelInfo.mat")]
+        for path in candidates:
+            if not path.exists():
+                continue
+            try:
+                if path.suffix == ".json":
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                    if raw.get("format") == "pyneuroscope-probes":
+                        if raw.get("version") != 1 or len(raw.get("probes", [])) != 1:
+                            continue
+                        raw = raw["probes"][0]
+                        if raw.get("n_channels") != self.probes[index].n_channels:
+                            raise ProbeGeometryError("Probe settings channel count differs from the XML")
+                    self.probes[index].probe_type = str(raw.get("probe_type", self.probes[index].probe_type))
+                    self.probes[index].cmap = str(raw.get("cmap", self.probes[index].cmap))
+                    if not raw.get("has_map", bool(raw.get("sites"))):
+                        self.probes[index].channel_map = None
+                        break
+                mapping = parse_recording_channel_map(raw) if path.suffix == ".json" else load_recording_channel_map(path)
+                self._set_probe_channel_map(index, mapping)
+            except (ProbeGeometryError, ValueError, OSError) as exc:
+                self.statusBar().showMessage(f"Recording map: {exc}", 8000)
+            break
+
+    def _edit_active_sites(self, index: int) -> None:
+        probe = self.probes[index]
+        geometry = load_probe_geometry(probe.probe_type)
+        if geometry is None or not geometry.physical_sites:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Probe {index + 1}: physical sites in DAT channel order")
+        dialog.resize(540, 380)
+        layout = QVBoxLayout(dialog)
+        label = QLabel(f"Enter {probe.n_channels} physical site IDs, starting with DAT channel 0.\n"
+                       "Separate IDs with spaces or commas. Single shank: 0, 1, …\n"
+                       "Four shank: shank:site, e.g. 0:0, 2:512. All IDs are zero-based.")
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        editor = QTextEdit()
+        if probe.channel_map is not None:
+            editor.setPlainText(", ".join(probe.channel_map.site_ids.get(ch, "") for ch in range(probe.n_channels)))
+        layout.addWidget(editor)
+        buttons = QHBoxLayout()
+        apply = QPushButton("Apply")
+        cancel = QPushButton("Cancel")
+        def accept_sites():
+            try:
+                self._set_probe_channel_map(index, selected_site_map(editor.toPlainText(), geometry, probe.n_channels))
+            except ProbeGeometryError as exc:
+                QMessageBox.critical(dialog, "Active site IDs", str(exc))
+                return
+            dialog.accept()
+        apply.clicked.connect(accept_sites)
+        cancel.clicked.connect(dialog.reject)
+        buttons.addWidget(apply)
+        buttons.addWidget(cancel)
+        layout.addLayout(buttons)
+        dialog.exec()
+
+    def _save_probe_xml(self, index: int) -> None:
+        probe = self.probes[index]
+        offset = sum(p.n_channels for p in self.probes[:index])
+        groups = [ChannelGroup(g.name, [ch - offset for ch in g.channels if offset <= ch < offset + probe.n_channels])
+                  for g in self.groups]
+        groups = [g for g in groups if g.channels]
+        bad = {ch - offset for ch in self.bad_channels if offset <= ch < offset + probe.n_channels}
+        colors = {ch - offset: color for ch, color in self.channel_colors.items() if offset <= ch < offset + probe.n_channels}
+        xml = build_neurocode_xml(probe.n_channels, self.sampling_rate.value(), self.lfp_sampling_rate.value(),
+                                  groups, bad, metadata=probe.metadata or self.loaded_metadata, channel_colors=colors)
+        path, _ = QFileDialog.getSaveFileName(self, f"Update Probe {index + 1} XML", str(probe.xml_path or f"probe_{index + 1}.xml"),
+                                             "XML files (*.xml)")
+        if not path:
+            return
+        try:
+            Path(path).write_text(xml, encoding="utf-8")
+            settings = dict(format="pyneuroscope-probes", version=1, color_mode=self.color_mode.currentText(),
+                            probes=[self._probe_settings(probe)])
+            Path(path).with_suffix(".probes.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.critical(self, "Update XML", str(exc))
+            return
+        probe.xml_path = Path(path)
+        probe.metadata = parse_neurosuite_xml(xml)[0]
+        self.xml_settings_note.clear()
+        self._refresh_probe_controls()
+        self.statusBar().showMessage(f"Updated Probe {index + 1} XML: {path}", 5000)
+
+    def _probe_settings(self, probe: ProbeConfig) -> dict:
+        mapping = probe.channel_map
+        if mapping is None and self._chanmap_geometry_path is not None:
+            session = self._session_channel_map()
+            offset = 0
+            for item in self.probes:
+                if item is probe:
+                    break
+                offset += item.n_channels
+            if session is not None:
+                mapping = RecordingChannelMap({ch - offset: p for ch, p in session.positions.items()
+                                               if offset <= ch < offset + probe.n_channels},
+                                              {ch - offset for ch in session.active_channels if offset <= ch < offset + probe.n_channels},
+                                              {ch - offset: site for ch, site in session.site_ids.items()
+                                               if offset <= ch < offset + probe.n_channels})
+        sites = [] if mapping is None else [
+            dict(channel=ch, x=position.x, y=position.y, site_id=mapping.site_ids.get(ch, ""), active=ch in mapping.active_channels)
+            for ch, position in sorted(mapping.positions.items())]
+        return dict(n_channels=probe.n_channels, probe_type=probe.probe_type, cmap=probe.cmap, has_map=mapping is not None, sites=sites)
+
     def _apply_probe_configs_to_model(self) -> None:
         total, groups, bad = self._merged_probe_model()
         self._group_source = "probe"
-        self.loaded_metadata = RecordingMetadata(
+        source = self.probes[0].metadata or RecordingMetadata()
+        self.loaded_metadata = replace(source,
             n_channels=total,
             sampling_rate=self.sampling_rate.value(),
             lfp_sampling_rate=self.lfp_sampling_rate.value(),
@@ -853,6 +1040,7 @@ class MainWindow(QMainWindow):
         self.probe_viewer = ProbeViewer()
         self.probe_viewer.channelDoubleClicked.connect(self._toggle_bad_channel)
         self.probe_viewer.groupClicked.connect(self._toggle_group_visibility)
+        self.probe_viewer.channelsSelected.connect(self._select_probe_channels)
         self.channel_profile_viewer = ChannelProfileViewer()
         self.channel_tabs = QTabWidget()
         self.channel_tabs.setUsesScrollButtons(False)
@@ -864,7 +1052,7 @@ class MainWindow(QMainWindow):
         self.color_map.setCurrentText("summer")
         self.color_map.currentTextChanged.connect(self._reset_colors)
         self.color_mode = QComboBox()
-        self.color_mode.addItems(["all", "group", "per region"])
+        self.color_mode.addItems(["all", "group", "per region", "per probe"])
         self.color_mode.setCurrentText("all")
         self.color_mode.currentTextChanged.connect(self._color_mode_changed)
         color_row = QHBoxLayout()
@@ -878,10 +1066,23 @@ class MainWindow(QMainWindow):
         self.region_cmap_panel = QWidget()
         self.region_cmap_layout = QFormLayout(self.region_cmap_panel)
         self.region_cmap_panel.setVisible(False)
+        self.probe_cmap_panel = QWidget()
+        self.probe_cmap_layout = QFormLayout(self.probe_cmap_panel)
+        self.probe_cmap_panel.setVisible(False)
+        self._refresh_probe_cmap_controls()
         layout.addWidget(self.channel_tabs, 1)
+        probe_navigation = QHBoxLayout()
+        show_all = QPushButton("Show all channels")
+        show_all.clicked.connect(lambda: self._select_probe_channels(None))
+        fit = QPushButton("Fit probe")
+        fit.clicked.connect(self.probe_viewer.reset_view)
+        probe_navigation.addWidget(show_all)
+        probe_navigation.addWidget(fit)
+        layout.addLayout(probe_navigation)
         layout.addLayout(color_row)
         layout.addLayout(color_mode_row)
         layout.addWidget(self.region_cmap_panel)
+        layout.addWidget(self.probe_cmap_panel)
         return panel
 
     def _browse_dat(self) -> None:
@@ -1326,20 +1527,38 @@ class MainWindow(QMainWindow):
             self,
             "Load Session ChannelMap",
             start,
-            "MAT files (*.mat);;All files (*)",
+            "Channel maps (*.mat *.json);;All files (*)",
         )
         if not path:
             return
         chanmap_path = Path(path)
         try:
-            geometry = load_chanmap_geometry(chanmap_path)
+            mapping = load_recording_channel_map(chanmap_path)
+            geometry = mapping.positions
+            offset = 0
+            for probe in self.probes:
+                local = RecordingChannelMap({ch - offset: p for ch, p in mapping.positions.items()
+                                             if offset <= ch < offset + probe.n_channels},
+                                            {ch - offset for ch in mapping.active_channels
+                                             if offset <= ch < offset + probe.n_channels},
+                                            {ch - offset: site for ch, site in mapping.site_ids.items()
+                                             if offset <= ch < offset + probe.n_channels})
+                self._validate_probe_mapping(probe, local)
+                offset += probe.n_channels
         except ProbeGeometryError as exc:
             QMessageBox.critical(self, "ChannelMap Error", str(exc))
             return
         if not geometry:
             QMessageBox.critical(self, "ChannelMap Error", f"No geometry found in {chanmap_path.name}")
             return
+        if any(ch >= self.n_channels.value() for ch in geometry):
+            QMessageBox.critical(self, "ChannelMap Error", "Recording map channel IDs exceed Total nChannels")
+            return
+        for probe in self.probes:
+            probe.channel_map = None
         self._chanmap_geometry_path = chanmap_path
+        self._session_map_cache = None
+        self.selected_channels = None
         self._refresh_viewer_layout()
         self.statusBar().showMessage(f"Loaded ChannelMap: {chanmap_path.name}", 5000)
 
@@ -1389,25 +1608,34 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "XML Error", str(exc))
             return
         self.loaded_metadata = metadata
+        self._chanmap_geometry_path = None
+        self._session_map_cache = None
         self._group_source = "xml"
         for widget in [self.n_channels, self.sampling_rate, self.lfp_sampling_rate]:
             widget.blockSignals(True)
         self.n_channels.setValue(metadata.n_channels)
-        self.sampling_rate.setValue(metadata.sampling_rate)
+        if metadata.sampling_rate > 0:
+            self.sampling_rate.setValue(metadata.sampling_rate)
         if metadata.lfp_sampling_rate > 0:
             self.lfp_sampling_rate.setValue(metadata.lfp_sampling_rate)
         for widget in [self.n_channels, self.sampling_rate, self.lfp_sampling_rate]:
             widget.blockSignals(False)
         self.groups = groups
         self.group_designs = group_designs_from_groups(groups)
+        self.bad_channels = bad
         self.probes = [
             ProbeConfig(
                 n_channels=metadata.n_channels,
                 xml_path=path,
                 groups=groups,
                 bad_channels=bad,
+                metadata=metadata,
             )
         ]
+        restored = self._restore_probe_settings(path)
+        if len(self.probes) == 1 and not restored:
+            self._load_probe_companion(0, path)
+        self._set_xml_settings_note(metadata)
         self._refresh_probe_controls()
         self._reset_visible_groups()
         self.bad_channels = bad
@@ -1786,7 +2014,13 @@ class MainWindow(QMainWindow):
                 return index
         return None
 
-    def _spike_unit_is_visible(self, unit) -> bool:
+    def _spike_unit_is_visible(self, unit, active_channels: set[int] | None = None) -> bool:
+        if self.selected_channels is not None and unit.channel not in self.selected_channels:
+            return False
+        if active_channels is None and (self._chanmap_geometry_path is not None or any(p.channel_map is not None for p in self.probes)):
+            active_channels = self._active_recording_channels()
+        if unit.channel is not None and active_channels is not None and unit.channel not in active_channels:
+            return False
         group_index = self._probe_group_for_channel(unit.channel)
         if group_index is None:
             return True
@@ -1797,12 +2031,14 @@ class MainWindow(QMainWindow):
             return
         overlays: list[SignalSpikeOverlay] = []
         if self.spikes_data is not None:
+            active_channels = self._active_recording_channels() if (
+                self._chanmap_geometry_path is not None or any(p.channel_map is not None for p in self.probes)) else None
             unit_colors: dict[int, str] = {}
             groups: dict[str, list] = {}
             ordered_units = [
                 unit
                 for unit in self._ordered_spike_units_for_display()
-                if self._spike_unit_is_visible(unit)
+                if self._spike_unit_is_visible(unit, active_channels)
             ]
             for unit in ordered_units:
                 groups.setdefault(self._spike_group_label(unit), []).append(unit)
@@ -2277,6 +2513,8 @@ class MainWindow(QMainWindow):
                 )
             elif color_mode == "per region":
                 self.channel_colors = self._color_by_region_cmap()
+            elif color_mode == "per probe":
+                self.channel_colors = self._color_by_probe_cmap()
             else:
                 self.channel_colors = self._color_by_group_local_cmap()
         except ColorMapError:
@@ -2289,7 +2527,43 @@ class MainWindow(QMainWindow):
 
     def _color_mode_changed(self) -> None:
         self._refresh_region_cmap_controls()
+        self._refresh_probe_cmap_controls()
         self._reset_colors()
+
+    def _refresh_probe_cmap_controls(self) -> None:
+        if not hasattr(self, "probe_cmap_layout"):
+            return
+        while self.probe_cmap_layout.count():
+            item = self.probe_cmap_layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        self.probe_cmap_controls = {}
+        visible = self.color_mode.currentText() == "per probe"
+        self.probe_cmap_panel.setVisible(visible)
+        if not visible:
+            return
+        for index, probe in enumerate(self.probes):
+            combo = QComboBox()
+            combo.addItems(COLOR_MAP_NAMES)
+            combo.setCurrentText(probe.cmap)
+            combo.currentTextChanged.connect(lambda name, i=index: self._probe_cmap_changed(i, name))
+            self.probe_cmap_layout.addRow(f"Probe {index + 1}", combo)
+            self.probe_cmap_controls[index] = combo
+
+    def _probe_cmap_changed(self, index: int, name: str) -> None:
+        self.probes[index].cmap = name
+        self._reset_colors()
+
+    def _color_by_probe_cmap(self) -> dict[int, str]:
+        colors = {ch: "#808080" for ch in range(self.n_channels.value())}
+        offset = 0
+        for probe in self.probes:
+            channels = [ch for g in self.groups for ch in g.channels if offset <= ch < offset + probe.n_channels]
+            palette = palette_from_name(probe.cmap, max(1, len(channels)))
+            for ch, color in zip(channels, palette):
+                colors[ch] = color
+            offset += probe.n_channels
+        return colors
 
     def _refresh_region_cmap_controls(self) -> None:
         if not hasattr(self, "region_cmap_layout"):
@@ -2406,6 +2680,14 @@ class MainWindow(QMainWindow):
 
     def _reset_visible_groups(self) -> None:
         self.visible_groups = set(range(len(self.groups)))
+        self.selected_channels = None
+
+    def _select_probe_channels(self, channels: set[int] | None) -> None:
+        self.selected_channels = None if channels is None else {ch for ch in channels if 0 <= ch < self.n_channels.value()}
+        self._refresh_viewer_layout()
+        self._refresh_spike_overlay()
+        count = "all" if self.selected_channels is None else str(len(self.selected_channels))
+        self.statusBar().showMessage(f"Showing {count} selected channels", 2500)
 
     def _effective_visible_group_indices(self) -> set[int]:
         all_groups = set(range(len(self.groups)))
@@ -2590,7 +2872,7 @@ class MainWindow(QMainWindow):
     def _refresh_viewer_layout(self) -> None:
         time = getattr(self, "_current_time", None)
         data = getattr(self, "_current_data", None)
-        channel_geometry = self._probe_channel_geometry()
+        channel_geometry, physical_sites, active_channels = self._probe_scene()
         if self.view_mode.currentText() == "group_columns":
             layout_groups = self._visible_groups()
             layout = group_column_layout(
@@ -2629,32 +2911,81 @@ class MainWindow(QMainWindow):
             self.channel_colors,
             self.visible_groups,
             channel_geometry,
+            physical_sites=physical_sites,
+            active_channels=active_channels,
+            selected_channels=self.selected_channels,
         )
         if self._is_channel_profile_tab_active():
             self._refresh_channel_profile()
 
     def _probe_channel_geometry(self) -> dict[int, ProbeSitePosition]:
-        if self._chanmap_geometry_path is not None:
-            return self._chanmap_channel_geometry()
+        return self._probe_scene()[0]
 
+    def _session_channel_map(self) -> RecordingChannelMap | None:
+        path = self._chanmap_geometry_path
+        if path is None:
+            return None
+        try:
+            stat = path.stat()
+            key = (str(path), stat.st_mtime_ns, stat.st_size)
+            if self._session_map_cache is None or self._session_map_cache[0] != key:
+                self._session_map_cache = (key, load_recording_channel_map(path))
+            return self._session_map_cache[1]
+        except (OSError, ProbeGeometryError) as exc:
+            self.statusBar().showMessage(f"Recording map: {exc}", 5000)
+            return None
+
+    def _probe_scene(self) -> tuple[dict[int, ProbeSitePosition], list[ProbeSitePosition], set[int]]:
+        session_map = self._session_channel_map()
         geometry_by_channel: dict[int, ProbeSitePosition] = {}
+        physical_sites = []
+        active = set(range(self.n_channels.value()))
         offset = 0
+        next_x = 0.0
         for probe_index, probe in enumerate(self.probes):
+            geometry = None
             if probe.probe_type:
                 try:
                     geometry = load_probe_geometry(probe.probe_type)
                 except ProbeGeometryError as exc:
                     self.statusBar().showMessage(f"Probe {probe_index + 1} geometry error: {exc}", 5000)
                     geometry = None
-                if geometry is not None:
-                    groups = probe.groups or [
-                        ChannelGroup(f"probe{probe_index + 1}", list(range(probe.n_channels)))
-                    ]
-                    geometry_by_channel.update(
-                        geometry.positions_for_groups(groups, channel_offset=offset)
-                    )
+            groups = [ChannelGroup(g.name, [ch - offset for ch in g.channels if offset <= ch < offset + probe.n_channels])
+                      for g in self.groups]
+            groups = [g for g in groups if g.channels]
+            mapping = probe.channel_map
+            if mapping is None and session_map is not None:
+                mapping = RecordingChannelMap({ch - offset: p for ch, p in session_map.positions.items()
+                                               if offset <= ch < offset + probe.n_channels},
+                                              {ch - offset for ch in session_map.active_channels
+                                               if offset <= ch < offset + probe.n_channels})
+            positions = mapping.positions if mapping is not None else (
+                geometry.positions_for_groups(groups) if geometry is not None else {})
+            background = list(geometry.physical_sites.values()) if geometry is not None else []
+            points = background + list(positions.values())
+            if points:
+                min_x = min(p.x for p in points)
+                shift = 0.0 if probe_index == 0 else next_x - min_x
+                geometry_by_channel.update({ch + offset: ProbeSitePosition(p.x + shift, p.y) for ch, p in positions.items()})
+                physical_sites.extend(ProbeSitePosition(p.x + shift, p.y) for p in background)
+                next_x = max(p.x + shift for p in points) + 180.0
+            if mapping is not None:
+                active.difference_update(set(range(offset, offset + probe.n_channels)) - {ch + offset for ch in mapping.active_channels})
             offset += probe.n_channels
-        return geometry_by_channel
+        return geometry_by_channel, physical_sites, active
+
+    def _active_recording_channels(self) -> set[int]:
+        active = set(range(self.n_channels.value()))
+        session = self._session_channel_map()
+        offset = 0
+        for probe in self.probes:
+            span = set(range(offset, offset + probe.n_channels))
+            if probe.channel_map is not None:
+                active.difference_update(span - {ch + offset for ch in probe.channel_map.active_channels})
+            elif session is not None:
+                active.difference_update(span - session.active_channels)
+            offset += probe.n_channels
+        return active
 
     def _chanmap_channel_geometry(self) -> dict[int, ProbeSitePosition]:
         if self._chanmap_geometry_path is not None:
@@ -2737,6 +3068,9 @@ class MainWindow(QMainWindow):
     def _visible_groups(self) -> list[ChannelGroup]:
         visible_indices = self._effective_visible_group_indices()
         groups = [self.groups[index] for index in sorted(visible_indices)]
+        active = self._active_recording_channels()
+        groups = [ChannelGroup(g.name, [ch for ch in g.channels if ch in active and
+                                      (self.selected_channels is None or ch in self.selected_channels)]) for g in groups]
         if not self.ignore_bad_channels.isChecked():
             return groups
         return [ChannelGroup(group.name, [channel for channel in group.channels if channel not in self.bad_channels]) for group in groups]
@@ -2768,7 +3102,42 @@ class MainWindow(QMainWindow):
             return
         save_path = Path(path)
         save_path.write_text(xml, encoding="utf-8")
+        settings = dict(format="pyneuroscope-probes", version=1, color_mode=self.color_mode.currentText(),
+                        probes=[self._probe_settings(probe) for probe in self.probes])
+        save_path.with_suffix(".probes.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        self.xml_settings_note.clear()
         QMessageBox.information(self, "Saved", f"Saved XML to {path}")
+
+    def _restore_probe_settings(self, xml_path: Path) -> bool:
+        path = xml_path.with_suffix(".probes.json")
+        if not path.exists():
+            return False
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            if raw.get("format") != "pyneuroscope-probes" or raw.get("version") != 1:
+                raise ProbeGeometryError("Unsupported probe settings sidecar")
+            if sum(p["n_channels"] for p in raw["probes"]) != self.n_channels.value():
+                raise ProbeGeometryError("Probe settings channel count differs from the XML")
+            probes, offset = [], 0
+            for entry in raw["probes"]:
+                count = entry["n_channels"]
+                if type(count) is not int or count <= 0 or entry.get("cmap", "spring") not in COLOR_MAP_NAMES:
+                    raise ProbeGeometryError("Invalid probe count or colormap")
+                groups = [ChannelGroup(g.name, [ch - offset for ch in g.channels if offset <= ch < offset + count]) for g in self.groups]
+                probes.append(ProbeConfig(count, groups=[g for g in groups if g.channels],
+                                          bad_channels={ch - offset for ch in self.bad_channels if offset <= ch < offset + count},
+                                          probe_type=entry.get("probe_type", ""), cmap=entry.get("cmap", "spring"),
+                                          channel_map=parse_recording_channel_map(entry) if entry.get("has_map", bool(entry.get("sites"))) else None,
+                                          metadata=self.loaded_metadata))
+                if probes[-1].channel_map is not None:
+                    self._validate_probe_mapping(probes[-1], probes[-1].channel_map)
+                offset += count
+            self.probes = probes
+            self.color_mode.setCurrentText(raw.get("color_mode", "all"))
+            return True
+        except (OSError, ValueError, TypeError, KeyError, ProbeGeometryError) as exc:
+            self.statusBar().showMessage(f"Probe settings: {exc}", 8000)
+            return False
 
     def _window_start_seconds(self) -> float:
         return self.start_minutes.value() * 60.0 + self.start_seconds.value() + self.start_msec.value() / 1000.0

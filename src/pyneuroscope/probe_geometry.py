@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from importlib.resources import files
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
@@ -37,6 +39,8 @@ class ProbeGeometry:
     sites_by_group_slot: dict[tuple[int, int], ProbeSitePosition]
     group_pitch_um: float | None = None
     pattern: str | None = None
+    physical_sites: dict[str, ProbeSitePosition] = field(default_factory=dict)
+    note: str = ""
 
     def positions_for_groups(
         self,
@@ -89,6 +93,7 @@ def geometry_search_paths() -> list[Path]:
 
 def available_probe_geometries(paths: Iterable[Path] | None = None) -> list[str]:
     names: set[str] = set(BUILTIN_PROBE_PATTERNS)
+    names.update(neuropixels_specs())
     for directory in paths or geometry_search_paths():
         if not directory.is_dir():
             continue
@@ -107,6 +112,8 @@ def load_probe_geometry(name: str, paths: Iterable[Path] | None = None) -> Probe
         path = directory / f"{clean}.json"
         if path.is_file():
             return parse_probe_geometry(path.read_text(encoding="utf-8"), fallback_name=clean)
+    if clean in neuropixels_specs():
+        return _neuropixels_geometry(clean)
     pattern = _canonical_pattern(clean)
     if pattern:
         return ProbeGeometry(
@@ -118,6 +125,50 @@ def load_probe_geometry(name: str, paths: Iterable[Path] | None = None) -> Probe
             pattern=pattern,
         )
     return None
+
+
+@lru_cache(maxsize=3)
+def _neuropixels_geometry(name: str) -> ProbeGeometry:
+    spec = neuropixels_specs()[name]
+    physical = {
+        f"s{shank}_front_{site:04d}": ProbeSitePosition(
+            float(spec["x_pattern_um"][site % len(spec["x_pattern_um"])] + shank * spec["shank_pitch_um"]),
+            float(spec["first_site_y_um"] + (site // 2) * spec["row_pitch_um"]),
+        )
+        for shank in range(spec["shanks"])
+        for site in range(spec["sites_per_shank"])
+    }
+    return ProbeGeometry(name, "um", {}, {}, {}, physical_sites=physical, note=spec["note"])
+
+
+@lru_cache(maxsize=1)
+def neuropixels_specs() -> dict:
+    return json.loads(files("pyneuroscope.resources").joinpath("neuropixels_geometries.json").read_text(encoding="utf-8"))
+
+
+def selected_site_map(text: str, geometry: ProbeGeometry, n_channels: int) -> RecordingChannelMap:
+    """Selected physical IDs in DAT column order, with no hardware reordering."""
+    import re
+    tokens = [token for token in re.split(r"[\s,;]+", text.strip()) if token]
+    if len(tokens) != n_channels:
+        raise ProbeGeometryError(f"Enter exactly {n_channels} site IDs in DAT channel order (received {len(tokens)})")
+    ids = []
+    multi = any(site.startswith("s1_") for site in geometry.physical_sites)
+    for token in tokens:
+        if re.fullmatch(r"\d+", token) and not multi:
+            site = f"s0_front_{int(token):04d}"
+        elif re.fullmatch(r"\d+:\d+", token):
+            shank, index = map(int, token.split(":"))
+            site = f"s{shank}_front_{index:04d}"
+        else:
+            site = token
+        if site not in geometry.physical_sites:
+            raise ProbeGeometryError(f"Unknown physical site: {token}")
+        ids.append(site)
+    if len(ids) != len(set(ids)):
+        raise ProbeGeometryError("A physical site cannot occur twice in the DAT channel list")
+    return RecordingChannelMap({ch: geometry.physical_sites[site] for ch, site in enumerate(ids)},
+                               set(range(n_channels)), dict(enumerate(ids)))
 
 
 def positions_for_pattern(
@@ -138,27 +189,116 @@ def positions_for_pattern(
 
 
 def load_chanmap_geometry(path: str | Path) -> dict[int, ProbeSitePosition]:
-    mat_path = Path(path)
-    loaded = loadmat(mat_path, simplify_cells=True)
-    xcoords = _mat_vector(loaded.get("xcoords"), "xcoords")
-    ycoords = _mat_vector(loaded.get("ycoords"), "ycoords")
-    if xcoords.size != ycoords.size:
-        raise ProbeGeometryError(f"{mat_path.name} has mismatched xcoords/ycoords lengths")
-    channels = _chanmap_channels(loaded, xcoords.size)
-    if channels.size != xcoords.size:
-        raise ProbeGeometryError(f"{mat_path.name} has mismatched channel/xcoords lengths")
-    return {
-        int(channel): ProbeSitePosition(float(x), float(y))
-        for channel, x, y in zip(channels, xcoords, ycoords)
-        if np.isfinite(float(channel)) and np.isfinite(float(x)) and np.isfinite(float(y))
-    }
+    return load_recording_channel_map(path).positions
+
+
+@dataclass(frozen=True)
+class RecordingChannelMap:
+    positions: dict[int, ProbeSitePosition]
+    active_channels: set[int]
+    site_ids: dict[int, str] = field(default_factory=dict)
+
+    def __post_init__(self):
+        channels = set(self.positions)
+        if not self.active_channels.issubset(channels) or not set(self.site_ids).issubset(channels):
+            raise ProbeGeometryError("Active channels and site IDs must have recording coordinates")
+        ids = list(self.site_ids.values())
+        if len(ids) != len(set(ids)):
+            raise ProbeGeometryError("Duplicate physical site assignments")
+
+
+def load_recording_channel_map(path: str | Path) -> RecordingChannelMap:
+    """Read recording-column coordinates without compressing or renumbering rows."""
+    path = Path(path)
+    try:
+        if path.suffix.lower() == ".json":
+            return parse_recording_channel_map(json.loads(path.read_text(encoding="utf-8")))
+        loaded = loadmat(path, simplify_cells=True)
+        coords = loaded.get("chanCoords")
+        if coords is not None:
+            x = _mat_vector(coords.get("x"), "chanCoords.x")
+            y = _mat_vector(coords.get("y"), "chanCoords.y")
+            channels = _mat_vector(coords.get("channel", np.arange(1, len(x) + 1)), "channel") - 1
+            source = coords
+        else:
+            x = _mat_vector(loaded.get("xcoords"), "xcoords")
+            y = _mat_vector(loaded.get("ycoords"), "ycoords")
+            if "chanMap0ind" in loaded:
+                channels = _mat_vector(loaded["chanMap0ind"], "chanMap0ind")
+            elif "chanMap" in loaded:
+                channels = _mat_vector(loaded["chanMap"], "chanMap") - 1
+            else:
+                channels = np.arange(len(x))
+            source = loaded
+        if len(x) != len(y) or len(channels) != len(x):
+            raise ProbeGeometryError("Channel and coordinate lengths do not match")
+        channels = _checked_channel_ids(channels)
+        connected = np.asarray(source.get("connected", np.isfinite(x) & np.isfinite(y)), dtype=bool).reshape(-1)
+        active = np.asarray(source.get("active", connected), dtype=bool).reshape(-1)
+        site_ids = np.asarray(source.get("site_id", [""] * len(x)), dtype=object).reshape(-1)
+        if any(len(a) != len(x) for a in [connected, active, site_ids]):
+            raise ProbeGeometryError("Channel flags/site IDs and coordinate lengths do not match")
+        positions, active_channels, ids = {}, set(), {}
+        for channel, cx, cy, linked, used, site in zip(channels, x, y, connected, active, site_ids):
+            if not linked:
+                if used:
+                    raise ProbeGeometryError("An active channel cannot be disconnected")
+                continue
+            if not np.isfinite([cx, cy]).all():
+                raise ProbeGeometryError(f"Connected channel {channel} has non-finite coordinates")
+            positions[channel] = ProbeSitePosition(float(cx), float(cy))
+            if used:
+                active_channels.add(channel)
+            if str(site):
+                ids[channel] = str(site)
+        return RecordingChannelMap(positions, active_channels, ids)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, NotImplementedError) as exc:
+        raise ProbeGeometryError(f"{path.name}: {exc}") from exc
+
+
+def _checked_channel_ids(values) -> list[int]:
+    values = np.asarray(values, dtype=float).reshape(-1)
+    if not np.isfinite(values).all() or (values < 0).any() or (values != np.floor(values)).any():
+        raise ProbeGeometryError("Channel IDs must be finite, zero-based non-negative integers")
+    channels = [int(value) for value in values]
+    if len(channels) != len(set(channels)):
+        raise ProbeGeometryError("Duplicate recording channel IDs")
+    return channels
+
+
+def parse_recording_channel_map(raw: dict) -> RecordingChannelMap:
+    # Atlaxis JSON includes geometry and the selected contact_to_channel table.
+    if "geometry" in raw and "channel_map" in raw:
+        contacts = {c["contact_id"]: c for c in raw["geometry"]["contacts"]}
+        mapping = raw["channel_map"]
+        sites = [dict(channel=ch, site_id=site, x=contacts[site]["x_um"], y=contacts[site]["y_um"],
+                      active=ch not in mapping.get("skipped", []))
+                 for site, ch in mapping["contact_to_channel"].items()]
+    else:
+        sites = raw["sites"]
+    channels = _checked_channel_ids([s["channel"] for s in sites])
+    positions, active, ids = {}, set(), {}
+    for channel, site in zip(channels, sites):
+        if not site.get("connected", True):
+            if site.get("active", False):
+                raise ProbeGeometryError("An active channel cannot be disconnected")
+            continue
+        position = _parse_position(site, channel)
+        if not np.isfinite([position.x, position.y]).all():
+            raise ProbeGeometryError("Channel coordinates must be finite")
+        positions[channel] = position
+        if site.get("active", True):
+            active.add(channel)
+        if site.get("site_id"):
+            ids[channel] = str(site["site_id"])
+    return RecordingChannelMap(positions, active, ids)
 
 
 def find_chanmap_file(base_dirs: Iterable[Path], basenames: Iterable[str]) -> Path | None:
     names = [name for name in basenames if name]
     for base_dir in base_dirs:
         for name in names:
-            for filename in [f"{name}.chanMap.mat", f"{name}.ChanMap.mat"]:
+            for filename in [f"{name}.chanCoords.channelInfo.mat", f"{name}.chanMap.mat", f"{name}.ChanMap.mat"]:
                 candidate = base_dir / filename
                 if candidate.exists():
                     return candidate

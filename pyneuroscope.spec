@@ -4,6 +4,7 @@ block_cipher = None
 
 datas = [
     ("src/pyneuroscope/resources/probe_templates.json", "pyneuroscope/resources"),
+    ("src/pyneuroscope/resources/neuropixels_geometries.json", "pyneuroscope/resources"),
     ("logo/logo.ico", "pyneuroscope/resources"),
 ]
 

@@ -1,0 +1,23 @@
+{
+  "Neuropixels 1.0": {
+    "part_number": "NP1000", "shanks": 1, "sites_per_shank": 960,
+    "row_pitch_um": 20, "x_pattern_um": [-24, 8, -8, 24],
+    "shank_pitch_um": 250, "first_site_y_um": 200,
+    "note": "Probe-local micrometers; +y toward base. Physical site order follows Atlaxis s0_front_0000 IDs.",
+    "source": "https://github.com/yoshihito-saito/Atlaxis/blob/main/probes/Neuropixels/Neuropixels-1.0-single-shank.json"
+  },
+  "Neuropixels 2.0 single shank": {
+    "part_number": "NP2003", "shanks": 1, "sites_per_shank": 1280,
+    "row_pitch_um": 15, "x_pattern_um": [-8, 24],
+    "shank_pitch_um": 250, "first_site_y_um": 200,
+    "note": "Probe-local micrometers; +y toward base. Provisional 200 um tip-to-first-site offset, matching Atlaxis; not a certified tip registration.",
+    "source": "https://github.com/yoshihito-saito/Atlaxis/blob/main/probes/Neuropixels/Neuropixels-2.0-single-shank.json"
+  },
+  "Neuropixels 2.0 four shank": {
+    "part_number": "NP2013", "shanks": 4, "sites_per_shank": 1280,
+    "row_pitch_um": 15, "x_pattern_um": [-8, 24],
+    "shank_pitch_um": 250, "first_site_y_um": 200,
+    "note": "Probe-local micrometers; +y toward base. Provisional 200 um tip-to-first-site offset, matching Atlaxis; not a certified tip registration.",
+    "source": "https://github.com/yoshihito-saito/Atlaxis/blob/main/probes/Neuropixels/Neuropixels-2.0-four-shank.json"
+  }
+}
