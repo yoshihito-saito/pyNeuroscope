@@ -44,8 +44,8 @@ def test_parses_demo_xml_when_present() -> None:
     assert 34 in bad
 
 
-def test_parses_buzsaki64l_probe2_local_xml() -> None:
-    path = Path("probe_xmls/ProbeMaps/Neuronexus/Buzsaki64L_probe2_local.xml")
+def test_parses_bundled_buzsaki64l_xml() -> None:
+    path = Path("probe_xmls/ProbeMaps/Neuronexus/Buzsaki64L.xml")
 
     metadata, groups, bad = parse_neurosuite_xml(path)
     channels = [channel for group in groups for channel in group.channels]
