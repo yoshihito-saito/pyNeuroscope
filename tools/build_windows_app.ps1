@@ -9,9 +9,11 @@ Set-Location $RepoRoot
 
 if ($InstallPyInstaller) {
     python -m pip install pyinstaller
+    if ($LASTEXITCODE -ne 0) { throw "PyInstaller installation failed" }
 }
 
 python -m PyInstaller --clean --noconfirm pyneuroscope.spec
+if ($LASTEXITCODE -ne 0) { throw "App build failed" }
 
 $appDir = Join-Path $RepoRoot "dist\pyNeuroscope"
 $probeXmlSource = Join-Path $RepoRoot "probe_xmls"
@@ -19,17 +21,27 @@ $probeXmlTarget = Join-Path $appDir "probe_xmls"
 $probeGeometrySource = Join-Path $RepoRoot "probe_geometry"
 $probeGeometryTarget = Join-Path $appDir "probe_geometry"
 
-if (Test-Path $probeXmlSource) {
-    if (Test-Path $probeXmlTarget) {
-        Remove-Item -LiteralPath $probeXmlTarget -Recurse -Force
+function Remove-BundledDataFolder([string]$Target) {
+    $absoluteTarget = [IO.Path]::GetFullPath($Target)
+    $allowedRoot = [IO.Path]::GetFullPath($appDir).TrimEnd('\') + '\'
+    if (-not $absoluteTarget.StartsWith($allowedRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Bundled data target is outside the app directory: $absoluteTarget"
     }
+    if (Test-Path -LiteralPath $absoluteTarget) {
+        if ((Get-Item -LiteralPath $absoluteTarget).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+            throw "Refusing to replace a linked bundled data folder: $absoluteTarget"
+        }
+        Remove-Item -LiteralPath $absoluteTarget -Recurse -Force
+    }
+}
+
+if (Test-Path $probeXmlSource) {
+    Remove-BundledDataFolder $probeXmlTarget
     Copy-Item -LiteralPath $probeXmlSource -Destination $probeXmlTarget -Recurse
 }
 
 if (Test-Path $probeGeometrySource) {
-    if (Test-Path $probeGeometryTarget) {
-        Remove-Item -LiteralPath $probeGeometryTarget -Recurse -Force
-    }
+    Remove-BundledDataFolder $probeGeometryTarget
     Copy-Item -LiteralPath $probeGeometrySource -Destination $probeGeometryTarget -Recurse
 }
 

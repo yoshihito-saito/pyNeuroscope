@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
 import numpy as np
 from scipy.io import loadmat, savemat
 
+from . import __version__
 from .anatomical_map import AnatomicalMapError, build_anatomical_map_csv, load_anatomical_map_csv
 from .brain_region_editor import BrainRegionEditorDialog
 from .channel_profile_viewer import ChannelProfileViewer, channel_rms
@@ -92,7 +93,7 @@ class ProbeConfig:
 class MainWindow(QMainWindow):
     def __init__(self, initial_path: str | Path | None = None) -> None:
         super().__init__()
-        self.setWindowTitle("pyNeuroscope")
+        self.setWindowTitle(f"pyNeuroscope {__version__}")
         self.setWindowIcon(QIcon(str(files("pyneuroscope.resources").joinpath("logo.ico"))))
         self.resize(1280, 820)
         self.groups: list[ChannelGroup] = []

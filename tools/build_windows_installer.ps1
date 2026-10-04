@@ -11,6 +11,7 @@ if ($InstallPyInstaller) {
 } else {
     powershell -ExecutionPolicy Bypass -File .\tools\build_windows_app.ps1 -Zip
 }
+if ($LASTEXITCODE -ne 0) { throw "App packaging failed" }
 
 $zipPath = Join-Path $RepoRoot "pyNeuroscope-Windows.zip"
 $installerSource = Join-Path $RepoRoot "dist\pyNeuroscope-Setup.exe"
@@ -23,8 +24,10 @@ python -m PyInstaller `
     --windowed `
     --name pyNeuroscope-Setup `
     --icon logo\logo.ico `
+    --version-file tools\windows_version_info.txt `
     --add-data "$zipPath;." `
     tools\install_pyneuroscope.py
+if ($LASTEXITCODE -ne 0) { throw "Installer build failed" }
 
 Copy-Item -LiteralPath $installerSource -Destination $installerTarget -Force
 
