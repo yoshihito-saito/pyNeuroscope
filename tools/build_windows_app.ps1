@@ -66,7 +66,8 @@ if (Test-Path $probeGeometryTarget) {
 
 if ($Zip) {
     $zipPath = Join-Path $RepoRoot "pyNeuroscope-Windows.zip"
-    Compress-Archive -Path $appDir -DestinationPath $zipPath -Force
+    python -m zipfile -c $zipPath $appDir
+    if ($LASTEXITCODE -ne 0) { throw "ZIP packaging failed" }
     Write-Host ""
     Write-Host "Created zip:"
     Write-Host "  $zipPath"

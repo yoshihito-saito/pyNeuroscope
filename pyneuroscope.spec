@@ -33,6 +33,11 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
+# Qt on Windows uses the OS ICU API. Conda/Poppler DLLs found on PATH can
+# expose a different ABI and prevent QtCore from loading in the frozen app.
+a.binaries = [entry for entry in a.binaries
+              if entry[0].rsplit("\\", 1)[-1].rsplit("/", 1)[-1].lower()
+              not in {"icuuc.dll", "icuin.dll", "icudt.dll"}]
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(
