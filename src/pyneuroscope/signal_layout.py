@@ -18,6 +18,7 @@ class TraceLayoutItem:
     x: float | None = None
     y: float | None = None
     row_count: int | None = None
+    shank: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,7 @@ def single_column_layout(
                 ),
             )
         for channel in channels:
+            position = positions.get(channel) if channel in shanks else None
             items.append(
                 TraceLayoutItem(
                     channel=channel,
@@ -79,6 +81,9 @@ def single_column_layout(
                     column=0,
                     color=channel_colors.get(channel, default_color),
                     is_bad=channel in bad_channels,
+                    x=position.x if position is not None else None,
+                    y=position.y if position is not None else None,
+                    shank=shanks.get(channel),
                 )
             )
     return items
@@ -154,6 +159,7 @@ def _geometry_group_column_layout(
                         x=position.x,
                         y=position.y,
                         row_count=len(ordered),
+                        shank=shank,
                     ))
             unmatched = [channel for channel in group.channels
                          if channel not in channel_shanks or channel not in positions]

@@ -344,7 +344,7 @@ class MainWindow(QMainWindow):
         self.spectrogram_button.clicked.connect(self._show_spectrogram_window)
         self.csd_enabled = QPushButton("Current Source Density")
         self.csd_enabled.setCheckable(True)
-        self.csd_enabled.setToolTip("Overlay relative current source density on the recording traces")
+        self.csd_enabled.setToolTip("Overlay relative 1D CSD; NP2 contacts at the same depth are averaged per shank")
         self.csd_enabled.toggled.connect(self._refresh_viewer_layout)
         self.csd_cmap = QComboBox()
         self.csd_cmap.addItems(list(CSD_COLORMAPS))
