@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from math import ceil
 from typing import Sequence
 
 import numpy as np
@@ -11,7 +12,7 @@ from pyqtgraph import arrayToQPath
 
 from .csd import CSD_COLORMAPS, robust_csd_limits, standard_1d_csd
 from .bitmap_display import bitmap_amplitudes
-from .color_map import COLOR_MAP_NAMES, palette_from_name
+from .color_map import COLOR_MAP_NAMES, canonical_color_map_name, palette_from_name
 from .models import SignalEventOverlay, SignalSpikeOverlay
 from .signal_layout import TraceLayoutItem
 from .trace_display import peak_envelope_indices, trace_statistics
@@ -115,8 +116,14 @@ class SignalViewer(QWidget):
         self.update()
 
     def set_bitmap_colormaps(self, name: str, channel_colormaps: dict[int, str] | None = None) -> None:
-        clean = name if name in COLOR_MAP_NAMES else "summer"
-        overrides = {ch: cmap for ch, cmap in (channel_colormaps or {}).items() if cmap in COLOR_MAP_NAMES}
+        clean = canonical_color_map_name(name)
+        if clean not in COLOR_MAP_NAMES:
+            clean = "summer"
+        overrides = {}
+        for channel, cmap in (channel_colormaps or {}).items():
+            normalized = canonical_color_map_name(cmap)
+            if normalized in COLOR_MAP_NAMES:
+                overrides[channel] = normalized
         if clean != self._bitmap_colormap or overrides != self._bitmap_channel_colormaps:
             self._bitmap_colormap = clean
             self._bitmap_channel_colormaps = overrides
@@ -132,7 +139,10 @@ class SignalViewer(QWidget):
         self.update()
 
     def set_viewport_height(self, height: int) -> None:
-        self._viewport_height = max(1, int(height))
+        viewport_height = max(1, int(height))
+        if viewport_height == self._viewport_height:
+            return
+        self._viewport_height = viewport_height
         self._update_content_height()
 
     def reset_time_zoom(self) -> None:
@@ -143,17 +153,15 @@ class SignalViewer(QWidget):
 
     def _update_content_height(self) -> None:
         margins = 48 + self._bottom_overlay_height()
-        rows = self._display_row_count()
         base_available = max(1, self._viewport_height - margins)
-        content_height = margins + base_available * self._row_spacing
-        # Dense NP recordings must not collapse several channels into one
-        # screen pixel. Keep readable traces and one pixel per bitmap row;
-        # the enclosing scroll area provides access to all channels.
-        pixels_per_row = 1.0 if self._display_mode == "bitmap" else 8.0
-        min_row_height = max(1.0, pixels_per_row * self._row_spacing)
-        content_height = max(content_height, margins + rows * min_row_height)
-        self.setMinimumHeight(int(max(self._viewport_height, content_height)))
+        content_height = self._viewport_height + base_available * (self._row_spacing - 1.0)
+        self.setMinimumHeight(max(self._viewport_height, ceil(content_height)))
         self.updateGeometry()
+
+    def _trace_bottom(self, height: int) -> float:
+        available = max(24.0, height - 48 - self._bottom_overlay_height())
+        # A viewport-sized widget still needs to honor spacing below 1.0.
+        return 24.0 + available * min(1.0, self._row_spacing)
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -175,11 +183,14 @@ class SignalViewer(QWidget):
         margin_bottom = 24
         label_gutter = 12 if compact_geometry_columns else 38
         bottom_overlay_height = self._bottom_overlay_height()
-        trace_bottom = max(margin_top + 24, height - margin_bottom - bottom_overlay_height)
+        trace_bottom = self._trace_bottom(height)
         visible_items = self._visible_layout_items()
         columns = max(item.column for item in self._layout_items) + 1
         rows_by_column = {
-            column: max((item.row for item in visible_items if item.column == column), default=-1) + 1
+            column: max(
+                (item.row_count or item.row + 1 for item in visible_items if item.column == column),
+                default=1,
+            )
             for column in range(columns)
         }
         column_width = max(24.0, (width - margin_left - margin_right) / columns)
@@ -264,7 +275,7 @@ class SignalViewer(QWidget):
             if item.channel < 0 or item.channel >= data.shape[1]:
                 continue
             rows = max(1, rows_by_column[item.column])
-            trace_height = max(1.0, (trace_bottom - margin_top) / rows)
+            trace_height = (trace_bottom - margin_top) / rows
             column_x0 = margin_left + item.column * column_width
             trace_x0 = column_x0 + label_gutter
             y_center = margin_top + (item.row + 0.5) * trace_height
@@ -423,7 +434,7 @@ class SignalViewer(QWidget):
             left = margin_left + column * column_width + label_gutter
             painter.drawImage(QRectF(left, top, trace_width, bottom - top), image)
         for item in valid:
-            row_height = max(1.0, (bottom - top) / rows_by_column[item.column])
+            row_height = (bottom - top) / rows_by_column[item.column]
             x0 = margin_left + item.column * column_width
             y = top + (item.row + 0.5) * row_height
             geometries[item.channel] = (x0 + label_gutter, trace_width, y, row_height, centers[item.channel], limit)
@@ -601,7 +612,7 @@ class SignalViewer(QWidget):
         if csd.size == 0:
             return
         rows = max(1, rows_by_column.get(column, len(ordered)))
-        trace_height = max(1.0, (trace_bottom - margin_top) / rows)
+        trace_height = (trace_bottom - margin_top) / rows
         top_row = min(item.row for item in ordered)
         bottom_row = max(item.row for item in ordered) + 1
         top = margin_top + top_row * trace_height
@@ -1022,7 +1033,10 @@ class SignalViewer(QWidget):
             return 1
         columns = max(item.column for item in self._layout_items) + 1
         return max(
-            max((item.row for item in self._layout_items if item.column == column), default=-1) + 1
+            max(
+                (item.row_count or item.row + 1 for item in self._layout_items if item.column == column),
+                default=1,
+            )
             for column in range(columns)
         )
 
@@ -1046,6 +1060,7 @@ class SignalViewer(QWidget):
                 is_bad=item.is_bad,
                 x=item.x,
                 y=item.y,
+                row_count=end - start if item.row_count is not None else None,
             )
             for item in self._layout_items
             if start <= item.row < end
@@ -1143,11 +1158,8 @@ class SignalViewer(QWidget):
             return None
         height = max(1, self.height())
         margin_top = 24
-        margin_bottom = 24
-        if self._display_mode == "bitmap":
-            margin_bottom += self._bottom_overlay_height()
         rows = self._display_row_count()
-        trace_height = max(1.0, (height - margin_top - margin_bottom) / max(1, rows))
+        trace_height = (self._trace_bottom(height) - margin_top) / max(1, rows)
         top = max(0.0, min(y1, y2) - margin_top)
         bottom = max(0.0, max(y1, y2) - margin_top)
         selected_start = int(top // trace_height)

@@ -17,6 +17,31 @@ class TraceLayoutItem:
     is_bad: bool
     x: float | None = None
     y: float | None = None
+    row_count: int | None = None
+
+
+@dataclass(frozen=True)
+class PhysicalRowGrid:
+    top_y: float
+    pitch: float
+    row_count: int
+
+    def row_for_y(self, y: float) -> int:
+        # Physical probes use +y toward the base, shown at the top of the map.
+        return max(0, min(self.row_count - 1, round((self.top_y - y) / self.pitch)))
+
+
+def physical_row_grid(sites: Iterable[ProbeSitePosition], *, max_rows: int = 4096) -> PhysicalRowGrid | None:
+    """Use one vertical scale for all contacts on physical probe layouts."""
+    y_values = sorted({site.y for site in sites})
+    if not y_values:
+        return None
+    span = y_values[-1] - y_values[0]
+    gaps = [upper - lower for lower, upper in zip(y_values, y_values[1:]) if upper > lower]
+    pitch = min(gaps) if gaps else 1.0
+    if span > 0:
+        pitch = max(pitch, span / max(1, max_rows - 1))
+    return PhysicalRowGrid(y_values[-1], pitch, min(max_rows, round(span / pitch) + 1))
 
 
 def single_column_layout(
@@ -51,9 +76,13 @@ def group_column_layout(
     *,
     default_color: str = "#1f77b4",
     channel_geometry: dict[int, ProbeSitePosition] | None = None,
+    physical_row_grids: dict[int, PhysicalRowGrid] | None = None,
 ) -> list[TraceLayoutItem]:
     if channel_geometry:
-        return _geometry_group_column_layout(groups, bad_channels, channel_colors, default_color, channel_geometry)
+        return _geometry_group_column_layout(
+            groups, bad_channels, channel_colors, default_color, channel_geometry,
+            physical_row_grids or {},
+        )
 
     items: list[TraceLayoutItem] = []
     for group_index, group in enumerate(groups):
@@ -77,6 +106,7 @@ def _geometry_group_column_layout(
     channel_colors: dict[int, str],
     default_color: str,
     channel_geometry: dict[int, ProbeSitePosition],
+    physical_row_grids: dict[int, PhysicalRowGrid],
 ) -> list[TraceLayoutItem]:
     items: list[TraceLayoutItem] = []
     column_offset = 0
@@ -102,7 +132,11 @@ def _geometry_group_column_layout(
             continue
 
         x_values = _rank_values(position.x for position in positions.values())
-        y_values = _rank_values(position.y for position in positions.values())
+        physical_grid = physical_row_grids.get(group_index)
+        y_values = _rank_values(position.y for position in positions.values()) if physical_grid is None else {}
+        missing_slots = [slot for slot, channel in enumerate(group.channels) if channel not in positions]
+        row_count = physical_grid.row_count if physical_grid is not None else len(y_values)
+        row_count = max(row_count, max(missing_slots, default=-1) + 1)
         for slot, channel in enumerate(group.channels):
             position = positions.get(channel)
             if position is None:
@@ -111,7 +145,7 @@ def _geometry_group_column_layout(
                 x = None
                 y = None
             else:
-                row = y_values[position.y]
+                row = physical_grid.row_for_y(position.y) if physical_grid is not None else y_values[position.y]
                 column = column_offset + x_values[position.x]
                 x = position.x
                 y = position.y
@@ -125,6 +159,7 @@ def _geometry_group_column_layout(
                     is_bad=channel in bad_channels,
                     x=x,
                     y=y,
+                    row_count=row_count,
                 )
             )
         column_offset += max(1, len(x_values))
