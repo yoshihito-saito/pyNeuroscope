@@ -91,8 +91,14 @@ This does not configure the acquisition hardware.
 Each probe's `Load active channel map` accepts `neuropixels_probeN_metadata.json`
 (WILDX applied probe receipt version 1), an `.imro` file, a probe-local
 `chanMap.mat`, Atlaxis `chanCoords.channelInfo.mat`, or an explicit JSON map.
-Neuropixels metadata and IMRO automatically set that probe's type and 384 DAT
-columns; a different channel count clears that probe's incompatible XML groups.
+For NP1/NP2, prefer `.imro` (the file dialog's first filter). Select the probe
+type manually in the Recording tab: NP1, NP2 single shank, or NP2 four shank.
+Metadata JSON uses that selected geometry even if its model label differs or is
+missing. A recognized IMRO header must agree with the selected type; unknown
+headers use the selected type and must still match its row format/site limits.
+When no Neuropixels type is selected, the map's declared model is used.
+Neuropixels maps set the probe to 384 DAT columns; a different channel count
+clears that probe's incompatible XML groups.
 WILDX uses `configuration.channels[].output_channel` and `site`; disconnected
 and standby channels are excluded from activity without compressing DAT columns.
 IMRO channel IDs must match the DAT readout order (no reordered/subset DAT).
@@ -113,6 +119,9 @@ Double-click clears an active selection. With no selection, double-clicking a
 channel toggles its bad-channel status.
 
 Updating probe XML or saving session XML saves a `.probes.json` companion.
+It embeds the active channel-to-site/shank assignments and selected probe type;
+for recordings with the same DAT/channel assignment, the original IMRO or
+metadata JSON is no longer required when reopening the saved settings.
 Keep this file alongside its XML to restore probe
 types, maps, and probe colormaps. Adjacent Atlaxis `.chanCoords.channelInfo.mat`
 companions are also loaded. Rectangle selections are temporary and are not

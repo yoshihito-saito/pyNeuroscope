@@ -470,7 +470,7 @@ class MainWindow(QMainWindow):
                 row_layout.addWidget(note)
             if probe.probe_type in neuropixels_specs():
                 load_map = QPushButton("Load active channel map")
-                load_map.setToolTip("Load this probe's Neuropixels metadata JSON, IMRO, or MAT/JSON channel map")
+                load_map.setToolTip("Load this probe's IMRO channel map (recommended), metadata JSON, or MAT/JSON map")
                 load_map.clicked.connect(lambda checked=False, probe_index=index: self._load_probe_channel_map(probe_index))
                 row_layout.addWidget(load_map)
             if probe.xml_path is not None:
@@ -556,6 +556,9 @@ class MainWindow(QMainWindow):
             cmap=self.probes[probe_index].cmap,
             metadata=metadata,
         )
+        # Map sorting must use the newly loaded XML groups, rather than the
+        # previous window's groups (often the initial four-channel default).
+        self.groups = self._merged_probe_model()[1]
         self._load_probe_companion(probe_index, xml_path)
         if probe_index == 0:
             if metadata.sampling_rate > 0:
@@ -578,10 +581,12 @@ class MainWindow(QMainWindow):
         selected = Path(self.dat_path.text().strip()) if self.dat_path.text().strip() else None
         start = str(selected if selected.is_dir() else selected.parent) if selected is not None else ""
         path, _ = QFileDialog.getOpenFileName(self, f"Active channel map for Probe {probe_index + 1}", start,
-                                             "Recording maps (*.imro *.json *.mat);;Neuropixels metadata (*.json);;IMRO (*.imro);;MAT channel maps (*.mat);;All files (*)")
+                                             "IMRO channel maps (*.imro);;Neuropixels metadata (*.json);;Other channel maps (*.json *.mat);;All files (*)")
         if path:
             try:
-                self._set_probe_channel_map(probe_index, load_recording_channel_map(path))
+                selected_type = self.probes[probe_index].probe_type
+                mapping = load_recording_channel_map(path, probe_type=selected_type if selected_type in neuropixels_specs() else None)
+                self._set_probe_channel_map(probe_index, mapping)
             except ProbeGeometryError as exc:
                 QMessageBox.critical(self, "Active channel map", str(exc))
 
@@ -657,11 +662,13 @@ class MainWindow(QMainWindow):
             if not path.exists():
                 continue
             try:
+                saved_color_mode = None
                 if path.suffix == ".json":
                     raw = json.loads(path.read_text(encoding="utf-8"))
                     if raw.get("format") == "pyneuroscope-probes":
                         if raw.get("version") != 1 or len(raw.get("probes", [])) != 1:
                             continue
+                        saved_color_mode = raw.get("color_mode")
                         raw = raw["probes"][0]
                         if raw.get("n_channels") != self.probes[index].n_channels:
                             raise ProbeGeometryError("Probe settings channel count differs from the XML")
@@ -669,9 +676,13 @@ class MainWindow(QMainWindow):
                     self.probes[index].cmap = str(raw.get("cmap", self.probes[index].cmap))
                     if not raw.get("has_map", bool(raw.get("sites"))):
                         self.probes[index].channel_map = None
+                        if isinstance(saved_color_mode, str):
+                            self.color_mode.setCurrentText(saved_color_mode)
                         break
                 mapping = parse_recording_channel_map(raw) if path.suffix == ".json" else load_recording_channel_map(path)
                 self._set_probe_channel_map(index, mapping)
+                if isinstance(saved_color_mode, str):
+                    self.color_mode.setCurrentText(saved_color_mode)
             except (ProbeGeometryError, ValueError, OSError) as exc:
                 self.statusBar().showMessage(f"Recording map: {exc}", 8000)
             break

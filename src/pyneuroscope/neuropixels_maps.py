@@ -54,12 +54,12 @@ def _physical_map(model: str, rows: list[dict]) -> RecordingChannelMap:
     return RecordingChannelMap(positions, active, ids, model, READOUT_CHANNELS)
 
 
-def parse_wildx_metadata(raw: dict) -> RecordingChannelMap:
+def parse_wildx_metadata(raw: dict, *, probe_type: str | None = None) -> RecordingChannelMap:
     """Use the applied selection, preserving output_channel order and standby."""
     try:
         if type(raw.get("format_version")) is not int or raw["format_version"] != 1:
             raise ProbeGeometryError("Unsupported WILDX metadata version")
-        model = raw["identity"]["model"]
+        model = probe_type if probe_type is not None else raw["identity"]["model"]
         if model not in neuropixels_specs():
             raise ProbeGeometryError(f"Unsupported WILDX probe model: {model}")
         config = raw["configuration"]
@@ -94,7 +94,7 @@ def _imro_model(identifier: str) -> str:
     raise ProbeGeometryError(f"Unsupported IMRO probe identifier: {identifier}")
 
 
-def parse_imro(text: str) -> RecordingChannelMap:
+def parse_imro(text: str, *, probe_type: str | None = None) -> RecordingChannelMap:
     """Read NP1/NP2 IMRO, including numeric and part-number headers."""
     text = text.strip()
     entries = re.findall(r"\(([^()]*)\)", text)
@@ -103,7 +103,18 @@ def parse_imro(text: str) -> RecordingChannelMap:
     header = [part.strip() for part in entries[0].split(",")]
     if len(header) != 2:
         raise ProbeGeometryError("Unsupported IMRO header: expected (probe identifier,384)")
-    model = _imro_model(header[0])
+    if probe_type is None:
+        model = _imro_model(header[0])
+    else:
+        if probe_type not in neuropixels_specs():
+            raise ProbeGeometryError(f"Unsupported selected probe type: {probe_type}")
+        try:
+            declared_model = _imro_model(header[0])
+        except ProbeGeometryError:
+            declared_model = None
+        if declared_model is not None and declared_model != probe_type:
+            raise ProbeGeometryError(f"IMRO describes {declared_model}; selected probe type is {probe_type}")
+        model = probe_type
     try:
         count = int(header[1])
     except ValueError as exc:

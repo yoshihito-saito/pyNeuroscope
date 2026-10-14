@@ -213,15 +213,15 @@ class RecordingChannelMap:
             raise ProbeGeometryError("Invalid recording map channel count")
 
 
-def load_recording_channel_map(path: str | Path) -> RecordingChannelMap:
+def load_recording_channel_map(path: str | Path, *, probe_type: str | None = None) -> RecordingChannelMap:
     """Read recording-column coordinates without compressing or renumbering rows."""
     path = Path(path)
     try:
         if path.suffix.lower() == ".json":
-            return parse_recording_channel_map(json.loads(path.read_text(encoding="utf-8-sig")))
+            return parse_recording_channel_map(json.loads(path.read_text(encoding="utf-8-sig")), probe_type=probe_type)
         if path.suffix.lower() == ".imro":
             from .neuropixels_maps import parse_imro
-            return parse_imro(path.read_text(encoding="utf-8-sig"))
+            return parse_imro(path.read_text(encoding="utf-8-sig"), probe_type=probe_type)
         loaded = loadmat(path, simplify_cells=True)
         coords = loaded.get("chanCoords")
         if coords is not None:
@@ -275,12 +275,12 @@ def _checked_channel_ids(values) -> list[int]:
     return channels
 
 
-def parse_recording_channel_map(raw: dict) -> RecordingChannelMap:
+def parse_recording_channel_map(raw: dict, *, probe_type: str | None = None) -> RecordingChannelMap:
     if not isinstance(raw, dict):
         raise ProbeGeometryError("Recording map must be a JSON object")
     if raw.get("format") == "WILDX NP applied probe receipt":
         from .neuropixels_maps import parse_wildx_metadata
-        return parse_wildx_metadata(raw)
+        return parse_wildx_metadata(raw, probe_type=probe_type)
     # Atlaxis JSON includes geometry and the selected contact_to_channel table.
     if "geometry" in raw and "channel_map" in raw:
         contacts = {c["contact_id"]: c for c in raw["geometry"]["contacts"]}
