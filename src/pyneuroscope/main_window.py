@@ -3145,8 +3145,12 @@ class MainWindow(QMainWindow):
     def _refresh_viewer_layout(self) -> None:
         time = getattr(self, "_current_time", None)
         data = getattr(self, "_current_data", None)
-        channel_geometry, physical_sites, active_channels, probe_row_grids = self._probe_scene()
+        channel_geometry, physical_sites, active_channels, probe_row_grids, np2_shanks = self._probe_scene()
+        display_colors = self.channel_colors
+        column_headers: list[tuple[int, int, str]] = []
         if self.view_mode.currentText() == "group_columns":
+            if np2_shanks:
+                display_colors = self._physical_display_colors(channel_geometry, np2_shanks)
             layout_groups = self._visible_groups()
             probe_ranges = []
             offset = 0
@@ -3164,10 +3168,21 @@ class MainWindow(QMainWindow):
             layout = group_column_layout(
                 layout_groups,
                 self.bad_channels,
-                self.channel_colors,
+                display_colors,
                 channel_geometry=channel_geometry,
                 physical_row_grids=group_row_grids,
+                channel_shanks=np2_shanks,
             )
+            columns_by_shank: dict[tuple[int, int, int], set[int]] = {}
+            for item in layout:
+                shank = np2_shanks.get(item.channel)
+                if shank is not None:
+                    columns_by_shank.setdefault((item.group_index, *shank), set()).add(item.column)
+            column_headers = [
+                (min(columns), max(columns) + 1, f"P{probe_index + 1} s{shank_index}")
+                for (_, probe_index, shank_index), columns in columns_by_shank.items()
+            ]
+            column_headers.sort(key=lambda header: header[0])
         else:
             layout_groups = self._visible_groups()
             layout = single_column_layout(
@@ -3209,12 +3224,13 @@ class MainWindow(QMainWindow):
             row_spacing=self.spacing.value(),
             show_channel_labels=self.view_mode.currentText() != "group_columns",
             epoch_boundaries=self._recording_epoch_boundaries,
+            column_headers=column_headers,
         )
         self.probe_viewer.set_probe(
             self.n_channels.value(),
             self.groups,
             self.bad_channels,
-            self.channel_colors,
+            display_colors,
             self.visible_groups,
             channel_geometry,
             physical_sites=physical_sites,
@@ -3227,6 +3243,55 @@ class MainWindow(QMainWindow):
 
     def _probe_channel_geometry(self) -> dict[int, ProbeSitePosition]:
         return self._probe_scene()[0]
+
+    def _physical_display_colors(
+        self,
+        positions: dict[int, ProbeSitePosition],
+        np2_shanks: dict[int, tuple[int, int]],
+    ) -> dict[int, str]:
+        """Follow shank, then descending physical y, in the geometry view."""
+        colors = dict(self.channel_colors)
+
+        def ordered(channels: list[int]) -> list[int]:
+            original_order = {channel: index for index, channel in enumerate(channels)}
+            return sorted(
+                channels,
+                key=lambda channel: (
+                    (0, *np2_shanks[channel], -positions[channel].y, positions[channel].x)
+                    if channel in np2_shanks and channel in positions
+                    else (1, original_order[channel], 0, 0, 0)
+                ),
+            )
+
+        def assign(channels: list[int], cmap_name: str) -> None:
+            palette = palette_from_name(cmap_name, max(1, len(channels)))
+            for channel, color in zip(ordered(channels), palette):
+                colors[channel] = color
+
+        try:
+            mode = self.color_mode.currentText()
+            if mode == "all":
+                channels = [channel for group in self.groups for channel in ordered(group.channels)]
+                for channel, color in zip(channels, self._color_palette(max(1, len(channels)))):
+                    colors[channel] = color
+            elif mode == "per probe":
+                offset = 0
+                for probe in self.probes:
+                    channels = [channel for group in self.groups for channel in group.channels
+                                if offset <= channel < offset + probe.n_channels]
+                    assign(channels, probe.cmap)
+                    offset += probe.n_channels
+            elif mode == "per group":
+                for index, group in enumerate(self.groups):
+                    assign(group.channels, self._group_cmap_name(index))
+            elif mode == "per region":
+                for region in self._ordered_channel_regions():
+                    combo = self.region_cmap_controls.get(region)
+                    cmap_name = combo.currentText() if combo is not None else self.color_map.currentText()
+                    assign(self._channels_for_region(region), cmap_name)
+        except ColorMapError:
+            return self.channel_colors
+        return colors
 
     def _session_channel_map(self) -> RecordingChannelMap | None:
         path = self._chanmap_geometry_path
@@ -3243,12 +3308,14 @@ class MainWindow(QMainWindow):
             return None
 
     def _probe_scene(self) -> tuple[
-        dict[int, ProbeSitePosition], list[ProbeSitePosition], set[int], dict[int, PhysicalRowGrid]
+        dict[int, ProbeSitePosition], list[ProbeSitePosition], set[int], dict[int, PhysicalRowGrid],
+        dict[int, tuple[int, int]],
     ]:
         session_map = self._session_channel_map()
         geometry_by_channel: dict[int, ProbeSitePosition] = {}
         physical_sites = []
         probe_row_grids: dict[int, PhysicalRowGrid] = {}
+        np2_shanks: dict[int, tuple[int, int]] = {}
         active = set(range(self.n_channels.value()))
         offset = 0
         next_x = 0.0
@@ -3268,9 +3335,29 @@ class MainWindow(QMainWindow):
                 mapping = RecordingChannelMap({ch - offset: p for ch, p in session_map.positions.items()
                                                if offset <= ch < offset + probe.n_channels},
                                               {ch - offset for ch in session_map.active_channels
+                                               if offset <= ch < offset + probe.n_channels},
+                                              {ch - offset: site for ch, site in session_map.site_ids.items()
                                                if offset <= ch < offset + probe.n_channels})
             positions = mapping.positions if mapping is not None else (
                 geometry.positions_for_groups(groups) if geometry is not None else {})
+            spec = neuropixels_specs().get(probe.probe_type) if probe.probe_type.startswith("Neuropixels 2.0") else None
+            if spec is not None:
+                for channel, position in positions.items():
+                    site_id = mapping.site_ids.get(channel, "") if mapping is not None else ""
+                    match = re.fullmatch(r"s(\d+)_front_\d+", site_id)
+                    if match is not None:
+                        shank = int(match.group(1))
+                    else:
+                        candidates = [
+                            (abs(position.x - (shank * spec["shank_pitch_um"] + lane_x)), shank)
+                            for shank in range(spec["shanks"])
+                            for lane_x in spec["x_pattern_um"]
+                        ]
+                        distance, shank = min(candidates)
+                        if distance > spec["shank_pitch_um"] / 4:
+                            continue
+                    if 0 <= shank < spec["shanks"]:
+                        np2_shanks[channel + offset] = (probe_index, shank)
             background = list(geometry.physical_sites.values()) if geometry is not None else []
             grid = physical_row_grid(background)
             if grid is not None:
@@ -3285,7 +3372,7 @@ class MainWindow(QMainWindow):
             if mapping is not None:
                 active.difference_update(set(range(offset, offset + probe.n_channels)) - {ch + offset for ch in mapping.active_channels})
             offset += probe.n_channels
-        return geometry_by_channel, physical_sites, active, probe_row_grids
+        return geometry_by_channel, physical_sites, active, probe_row_grids, np2_shanks
 
     def _active_recording_channels(self) -> set[int]:
         active = set(range(self.n_channels.value()))
