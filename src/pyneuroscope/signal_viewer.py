@@ -28,6 +28,7 @@ class SignalViewer(QWidget):
         self._time_seconds: np.ndarray | None = None
         self._data: np.ndarray | None = None
         self._layout_items: list[TraceLayoutItem] = []
+        self._column_headers: list[tuple[int, int, str]] = []
         self._vertical_scale = 1.0
         self._row_spacing = 1.0
         self._viewport_height = 360
@@ -69,6 +70,7 @@ class SignalViewer(QWidget):
         row_spacing: float = 1.0,
         show_channel_labels: bool = True,
         epoch_boundaries: Sequence[float] | None = None,
+        column_headers: Sequence[tuple[int, int, str]] = (),
     ) -> None:
         if data is not self._data or time_seconds is not self._time_seconds:
             self._trace_cache_key = None
@@ -79,6 +81,7 @@ class SignalViewer(QWidget):
         self._time_seconds = time_seconds
         self._data = data
         self._layout_items = list(layout_items)
+        self._column_headers = list(column_headers)
         self._vertical_scale = max(0.05, float(vertical_scale))
         self._row_spacing = max(0.25, float(row_spacing))
         self._show_channel_labels = bool(show_channel_labels)
@@ -199,6 +202,29 @@ class SignalViewer(QWidget):
         for column in range(columns):
             x0 = margin_left + column * column_width
             painter.drawLine(int(x0 + label_gutter), margin_top, int(x0 + label_gutter), height - margin_bottom)
+
+        if self._column_headers:
+            header_font = QFont()
+            header_font.setPointSize(8)
+            painter.setFont(header_font)
+            painter.setPen(QPen(self._color("label")))
+            painter.drawText(
+                QRectF(0, 2, margin_left - 2, margin_top - 4),
+                Qt.AlignmentFlag.AlignCenter,
+                "+y ↑",
+            )
+            for first, end, label in self._column_headers:
+                x0 = margin_left + first * column_width
+                painter.drawText(
+                    QRectF(x0, 2, (end - first) * column_width, margin_top - 4),
+                    Qt.AlignmentFlag.AlignCenter,
+                    label,
+                )
+                if first:
+                    painter.setPen(QPen(self._color("grid")))
+                    painter.drawLine(int(x0), margin_top, int(x0), height - margin_bottom)
+                    painter.setPen(QPen(self._color("label")))
+            painter.setFont(QFont())
 
         trace_width = max(8.0, column_width - label_gutter - 8)
         max_points = self._trace_display_max_points(trace_width, columns=columns)
@@ -447,7 +473,12 @@ class SignalViewer(QWidget):
                                  Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, f"ch {item.channel}")
         painter.setFont(QFont())
         painter.setPen(QPen(self._color("label")))
-        painter.drawText(50, 16, f"Amplitude: −{limit / self._vertical_scale:.3g} … +{limit / self._vertical_scale:.3g} counts (median centered)")
+        amplitude = limit / self._vertical_scale
+        if self._column_headers:
+            legend_x = 180 if self._x_range != (0.0, 1.0) else 50
+            painter.drawText(legend_x, self.height() - 8, f"Amplitude ±{amplitude:.3g} counts")
+        else:
+            painter.drawText(50, 16, f"Amplitude: −{amplitude:.3g} … +{amplitude:.3g} counts (median centered)")
         return geometries
 
     def _display_trace(self, channel, data, time, max_points):
@@ -602,6 +633,10 @@ class SignalViewer(QWidget):
         trace_bottom: float,
     ) -> None:
         if len(ordered) < 3:
+            return
+        if all(item.y is not None for item in ordered) and len({item.y for item in ordered}) != len(ordered):
+            # Two NP2 contacts can share one physical depth; treating them as
+            # successive depths would create a misleading 1D CSD estimate.
             return
         channels = [item.channel for item in ordered]
         depths = _csd_depths(ordered)

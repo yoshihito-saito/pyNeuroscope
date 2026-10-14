@@ -77,11 +77,12 @@ def group_column_layout(
     default_color: str = "#1f77b4",
     channel_geometry: dict[int, ProbeSitePosition] | None = None,
     physical_row_grids: dict[int, PhysicalRowGrid] | None = None,
+    channel_shanks: dict[int, tuple[int, int]] | None = None,
 ) -> list[TraceLayoutItem]:
     if channel_geometry:
         return _geometry_group_column_layout(
             groups, bad_channels, channel_colors, default_color, channel_geometry,
-            physical_row_grids or {},
+            physical_row_grids or {}, channel_shanks or {},
         )
 
     items: list[TraceLayoutItem] = []
@@ -107,6 +108,7 @@ def _geometry_group_column_layout(
     default_color: str,
     channel_geometry: dict[int, ProbeSitePosition],
     physical_row_grids: dict[int, PhysicalRowGrid],
+    channel_shanks: dict[int, tuple[int, int]],
 ) -> list[TraceLayoutItem]:
     items: list[TraceLayoutItem] = []
     column_offset = 0
@@ -116,6 +118,46 @@ def _geometry_group_column_layout(
             for channel in group.channels
             if channel in channel_geometry
         }
+        shanks = sorted({channel_shanks[channel] for channel in group.channels
+                         if channel in channel_shanks and channel in positions})
+        if shanks:
+            for shank_column, shank in enumerate(shanks):
+                ordered = sorted(
+                    (channel for channel in group.channels if channel_shanks.get(channel) == shank
+                     and channel in positions),
+                    key=lambda channel: (-positions[channel].y, positions[channel].x, channel),
+                )
+                for row, channel in enumerate(ordered):
+                    position = positions[channel]
+                    items.append(TraceLayoutItem(
+                        channel=channel,
+                        group_index=group_index,
+                        row=row,
+                        column=column_offset + shank_column,
+                        color=channel_colors.get(channel, default_color),
+                        is_bad=channel in bad_channels,
+                        x=position.x,
+                        y=position.y,
+                        row_count=len(ordered),
+                    ))
+            unmatched = [channel for channel in group.channels
+                         if channel not in channel_shanks or channel not in positions]
+            if unmatched:
+                for row, channel in enumerate(unmatched):
+                    position = positions.get(channel)
+                    items.append(TraceLayoutItem(
+                        channel=channel,
+                        group_index=group_index,
+                        row=row,
+                        column=column_offset + len(shanks),
+                        color=channel_colors.get(channel, default_color),
+                        is_bad=channel in bad_channels,
+                        x=position.x if position is not None else None,
+                        y=position.y if position is not None else None,
+                        row_count=len(unmatched),
+                    ))
+            column_offset += len(shanks) + bool(unmatched)
+            continue
         if not positions:
             for row, channel in enumerate(group.channels):
                 items.append(
