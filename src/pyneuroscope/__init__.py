@@ -1,6 +1,6 @@
 """Core logic for pyNeuroscope."""
 
-__version__ = "0.7.1"
+__version__ = "0.7.2"
 
 from .models import ChannelDisplaySettings, ChannelGroup, ProbeTemplate, RecordingMetadata
 

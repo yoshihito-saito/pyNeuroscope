@@ -221,10 +221,11 @@ def test_active_map_button_only_for_neuropixels_and_navigation_removed(app, monk
             w._probe_type_changed(0, probe_type)
             row = w.probe_rows_layout.itemAt(0).widget()
             buttons = {b.text(): b for b in row.findChildren(QPushButton)}
-            assert "Update XML" in buttons
-            assert ("Load active channel map" in buttons) == (probe_type in neuropixels_specs())
+            assert ("Update XML" in buttons) == (probe_type not in neuropixels_specs())
+            assert ("Probe XML" in buttons) == (probe_type not in neuropixels_specs())
+            assert ("Load IMRO" in buttons) == (probe_type in neuropixels_specs())
             if probe_type in neuropixels_specs():
-                buttons["Load active channel map"].click()
+                buttons["Load IMRO"].click()
                 assert calls[-1] == 0
         right_buttons = [b.text() for b in w.color_mode.parentWidget().findChildren(QPushButton)]
         assert "Show all channels" not in right_buttons and "Fit probe" not in right_buttons

@@ -111,6 +111,7 @@ class SignalViewer(QWidget):
 
     def set_display_mode(self, mode: str) -> None:
         self._display_mode = "bitmap" if mode == "bitmap" else "trace"
+        self._update_content_height()
         self.update()
 
     def set_bitmap_colormaps(self, name: str, channel_colormaps: dict[int, str] | None = None) -> None:
@@ -145,8 +146,12 @@ class SignalViewer(QWidget):
         rows = self._display_row_count()
         base_available = max(1, self._viewport_height - margins)
         content_height = margins + base_available * self._row_spacing
-        if rows > 0 and self._row_spacing > 1.0:
-            content_height = max(content_height, margins + rows * 8 * self._row_spacing)
+        # Dense NP recordings must not collapse several channels into one
+        # screen pixel. Keep readable traces and one pixel per bitmap row;
+        # the enclosing scroll area provides access to all channels.
+        pixels_per_row = 1.0 if self._display_mode == "bitmap" else 8.0
+        min_row_height = max(1.0, pixels_per_row * self._row_spacing)
+        content_height = max(content_height, margins + rows * min_row_height)
         self.setMinimumHeight(int(max(self._viewport_height, content_height)))
         self.updateGeometry()
 

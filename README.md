@@ -85,10 +85,12 @@ probe type.
 Choose a Neuropixels probe type and set `nChannels` to the number of DAT columns
 for that probe. The full physical layout is bundled; selecting a type does not
 invent an active recording map. Load the recorded selection using each probe's
-`Load active channel map` (shown only for Neuropixels types).
+`Load IMRO` (shown only for Neuropixels types). Probe XML is optional: type plus
+one IMRO per probe sets its 384 DAT channels and active-site geometry. The NP
+controls show IMRO loading instead of the individual probe XML buttons.
 This does not configure the acquisition hardware.
 
-Each probe's `Load active channel map` accepts `neuropixels_probeN_metadata.json`
+Each probe's `Load IMRO` also accepts `neuropixels_probeN_metadata.json`
 (WILDX applied probe receipt version 1), an `.imro` file, a probe-local
 `chanMap.mat`, Atlaxis `chanCoords.channelInfo.mat`, or an explicit JSON map.
 For NP1/NP2, prefer `.imro` (the file dialog's first filter). Select the probe
@@ -154,6 +156,12 @@ spike overlays remain available. CSD overlay is available in trace mode.
 In bitmap mode, Ch map shows active channel dots and labels in white; bad,
 inactive, and unselected channels retain their status indicators. Switching
 back to trace restores the cmap colors.
+High channel counts use a scrollable display instead of packing multiple
+channels into a single pixel (at least 8 px per trace at Spacing 1, or 1 px per
+bitmap row). With three 384-channel probes, all 1152 channels remain accessible
+by scrolling; probe selection can restrict the display to a smaller set.
+Trace mode starts at `Scale 1` so adjacent traces remain separated; increase
+`Scale` for larger amplitudes or `Spacing` for more space between channels.
 
 `Edit Channel Groups` supports wheel zoom and − / + buttons, right/middle-drag
 panning, and `Reset view` to restore the initial position and magnification.

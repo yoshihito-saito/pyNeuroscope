@@ -413,14 +413,16 @@ class MainWindow(QMainWindow):
             title_row.setContentsMargins(0, 0, 0, 0)
             title = QLabel(f"Probe {index + 1}")
             title.setStyleSheet("font-weight: 600; color: #d6dde8;")
-            load_xml = QPushButton("Probe XML")
-            load_xml.clicked.connect(lambda checked=False, probe_index=index: self._load_probe_xml(probe_index))
-            update_xml = QPushButton("Update XML")
-            update_xml.clicked.connect(lambda checked=False, probe_index=index: self._save_probe_xml(probe_index))
             title_row.addWidget(title)
             title_row.addStretch(1)
-            title_row.addWidget(load_xml)
-            title_row.addWidget(update_xml)
+            is_neuropixels = probe.probe_type in neuropixels_specs()
+            if not is_neuropixels:
+                load_xml = QPushButton("Probe XML")
+                load_xml.clicked.connect(lambda checked=False, probe_index=index: self._load_probe_xml(probe_index))
+                update_xml = QPushButton("Update XML")
+                update_xml.clicked.connect(lambda checked=False, probe_index=index: self._save_probe_xml(probe_index))
+                title_row.addWidget(load_xml)
+                title_row.addWidget(update_xml)
             controls = QHBoxLayout()
             controls.setContentsMargins(0, 0, 0, 0)
             controls.setSpacing(5)
@@ -468,12 +470,12 @@ class MainWindow(QMainWindow):
                 note.setWordWrap(True)
                 note.setToolTip(geometry.note)
                 row_layout.addWidget(note)
-            if probe.probe_type in neuropixels_specs():
-                load_map = QPushButton("Load active channel map")
-                load_map.setToolTip("Load this probe's IMRO channel map (recommended), metadata JSON, or MAT/JSON map")
+            if is_neuropixels:
+                load_map = QPushButton("Load IMRO")
+                load_map.setToolTip("IMRO alone sets this probe's channels and geometry; no probe XML is required. Metadata JSON and MAT/JSON maps are also accepted.")
                 load_map.clicked.connect(lambda checked=False, probe_index=index: self._load_probe_channel_map(probe_index))
                 row_layout.addWidget(load_map)
-            if probe.xml_path is not None:
+            if probe.xml_path is not None and not is_neuropixels:
                 loaded = QLabel(probe.xml_path.name)
                 loaded.setWordWrap(True)
                 row_layout.addWidget(loaded)
@@ -556,9 +558,10 @@ class MainWindow(QMainWindow):
             cmap=self.probes[probe_index].cmap,
             metadata=metadata,
         )
-        # Map sorting must use the newly loaded XML groups, rather than the
-        # previous window's groups (often the initial four-channel default).
-        self.groups = self._merged_probe_model()[1]
+        # Map sorting and colors must use the new XML's channel count and
+        # groups rather than the previous window's four-channel default.
+        total, self.groups, _ = self._merged_probe_model()
+        self._set_total_n_channels(total)
         self._load_probe_companion(probe_index, xml_path)
         if probe_index == 0:
             if metadata.sampling_rate > 0:
@@ -634,7 +637,7 @@ class MainWindow(QMainWindow):
         if count_changed:
             self._apply_probe_configs_to_model()
         else:
-            self._refresh_viewer_layout()
+            self._reset_colors()
         if mapping.probe_type:
             message = f"Probe {index + 1}: {candidate.probe_type}, {candidate.n_channels} DAT channels, {len(mapping.active_channels)} active"
             if count_changed and probe.xml_path is not None:
@@ -998,7 +1001,7 @@ class MainWindow(QMainWindow):
         self.scale.setRange(0.05, 20)
         self.scale.setDecimals(2)
         self.scale.setSingleStep(0.1)
-        self.scale.setValue(8.0)
+        self.scale.setValue(1.0)
         self.scale.valueChanged.connect(self._refresh_viewer_layout)
         self.spacing = QDoubleSpinBox()
         self.spacing.setRange(0.25, 8.0)
@@ -2883,7 +2886,7 @@ class MainWindow(QMainWindow):
             return 0.8
         if self.view_mode.currentText() == "group_columns":
             return 0.8 if self.bandpass_enabled.isChecked() else 1.0
-        return 1.0 if self.bandpass_enabled.isChecked() else 8.0
+        return 1.0
 
     def _process_window_data(self, data):
         processed = data
