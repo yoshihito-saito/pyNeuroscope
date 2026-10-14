@@ -37,18 +37,27 @@ COLOR_MAPS = {
     "cool": ["#00ffff", "#40bfff", "#8080ff", "#bf40ff", "#ff00ff"],
     "Wistia": ["#e4ff7a", "#ffed3f", "#ffc917", "#ff9a00", "#fc4e00"],
     "rainbow": ["#2d5bff", "#00a4ff", "#00d084", "#d8e52d", "#ff9d00", "#ff3d3d", "#b032ff"],
-    # Colored endpoints match Matplotlib's coolwarm; zero remains white.
-    "red_white_black": ["#b40426", "#ffffff", "#000000"],
-    "blue_white_black": ["#3b4cc0", "#ffffff", "#000000"],
+    "RdGy": ["#b40426", "#ffffff", "#000000"],
+    "BuGy": ["#3b4cc0", "#ffffff", "#000000"],
 }
 
-COLOR_MAP_NAMES = [*COLOR_MAPS, "coolwarm"]
+MATPLOTLIB_COLOR_MAPS = ("PiYG", "PRGn", "BrBG", "PuOr", "RdBu")
+COLOR_MAP_NAMES = [*COLOR_MAPS, *MATPLOTLIB_COLOR_MAPS]
+_LEGACY_COLOR_MAP_NAMES = {
+    "red_white_black": "RdGy",
+    "blue_white_black": "BuGy",
+    "coolwarm": "RdBu",
+}
 
 _HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
 class ColorMapError(ValueError):
     """Raised when a channel color map is invalid."""
+
+
+def canonical_color_map_name(name: str) -> str:
+    return _LEGACY_COLOR_MAP_NAMES.get(name, name)
 
 
 def spring_palette(size: int) -> list[str]:
@@ -69,14 +78,14 @@ def spring_palette(size: int) -> list[str]:
 def palette_from_name(name: str, size: int) -> list[str]:
     if size <= 0:
         raise ColorMapError("palette size must be positive")
-    if name == "coolwarm":
-        # Use the standard Matplotlib map, rather than a few approximate anchors.
+    if name == "coolwarm" or name in MATPLOTLIB_COLOR_MAPS:
+        # Keep direct access to coolwarm for older saved settings.
         from matplotlib import colormaps
         from matplotlib.colors import to_hex
 
         cmap = colormaps[name]
         return [to_hex(cmap(index / max(1, size - 1))) for index in range(size)]
-    anchors = COLOR_MAPS.get(name)
+    anchors = COLOR_MAPS.get(canonical_color_map_name(name))
     if anchors is None:
         raise ColorMapError(f"Unknown color map: {name}")
     if size == 1:

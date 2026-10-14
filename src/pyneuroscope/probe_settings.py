@@ -22,9 +22,11 @@ def embed_probe_settings(xml: str, settings: dict) -> str:
     node = ET.SubElement(root, _tag("probeSettings"),
                          version="1", colorMode=settings.get("color_mode", "all"),
                          colorMap=settings.get("color_map", "summer"))
+    for cmap in settings.get("group_cmaps", []):
+        ET.SubElement(node, _tag("groupCmap"), cmap=cmap)
     for probe in settings["probes"]:
         entry = ET.SubElement(node, _tag("probe"), nChannels=str(probe["n_channels"]),
-                              type=probe.get("probe_type", ""), cmap=probe.get("cmap", "spring"))
+                              type=probe.get("probe_type", ""), cmap=probe.get("cmap", "summer"))
         if probe.get("has_map", bool(probe.get("sites"))):
             mapping = ET.SubElement(entry, _tag("channelMap"))
             for site in probe.get("sites", []):
@@ -44,6 +46,7 @@ def read_probe_settings(path_or_text: str | Path) -> dict | None:
         raise XmlError("Unsupported embedded probe settings version")
     probes = []
     try:
+        group_cmaps = [entry.attrib["cmap"] for entry in node.findall(_tag("groupCmap"))]
         for probe in node.findall(_tag("probe")):
             mapping = probe.find(_tag("channelMap"))
             sites = []
@@ -56,7 +59,7 @@ def read_probe_settings(path_or_text: str | Path) -> dict | None:
                                       x=float(site.attrib["x"]), y=float(site.attrib["y"]),
                                       site_id=site.get("siteId", ""), active=active == "true"))
             probes.append(dict(n_channels=int(probe.attrib["nChannels"]),
-                               probe_type=probe.get("type", ""), cmap=probe.get("cmap", "spring"),
+                               probe_type=probe.get("type", ""), cmap=probe.get("cmap", "summer"),
                                has_map=mapping is not None, sites=sites))
     except (KeyError, ValueError) as exc:
         raise XmlError(f"Invalid embedded probe settings: {exc}") from exc
@@ -64,4 +67,5 @@ def read_probe_settings(path_or_text: str | Path) -> dict | None:
         raise XmlError("Embedded probe settings contain no probes")
     return dict(format="pyneuroscope-probes", version=1,
                 color_mode=node.get("colorMode", "all"),
-                color_map=node.get("colorMap", "summer"), probes=probes)
+                color_map=node.get("colorMap", "summer"), group_cmaps=group_cmaps,
+                probes=probes)
