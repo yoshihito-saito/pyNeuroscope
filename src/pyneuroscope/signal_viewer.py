@@ -596,12 +596,12 @@ class SignalViewer(QWidget):
     ) -> None:
         if sampled_data.ndim != 2 or sampled_data.shape[0] < 2:
             return
-        grouped: dict[tuple[int, int], list[TraceLayoutItem]] = {}
+        grouped: dict[tuple[int, int, tuple[int, int] | None], list[TraceLayoutItem]] = {}
         for item in visible_items:
             if 0 <= item.channel < sampled_data.shape[1]:
-                grouped.setdefault((item.column, item.group_index), []).append(item)
+                grouped.setdefault((item.column, item.group_index, item.shank), []).append(item)
 
-        for (column, _group_index), items in grouped.items():
+        for (column, _group_index, _shank), items in grouped.items():
             ordered = sorted(items, key=lambda item: item.row)
             for segment in self._csd_valid_segments(ordered):
                 self._draw_csd_segment(
@@ -634,14 +634,29 @@ class SignalViewer(QWidget):
     ) -> None:
         if len(ordered) < 3:
             return
-        if all(item.y is not None for item in ordered) and len({item.y for item in ordered}) != len(ordered):
-            # Two NP2 contacts can share one physical depth; treating them as
-            # successive depths would create a misleading 1D CSD estimate.
-            return
-        channels = [item.channel for item in ordered]
-        depths = _csd_depths(ordered)
+        if ordered[0].shank is not None:
+            # NP2 has two contacts at some depths. Average contacts at the same
+            # depth before computing one 1D CSD profile for this shank.
+            depth_groups: list[list[TraceLayoutItem]] = []
+            for item in ordered:
+                if not depth_groups or item.y != depth_groups[-1][0].y:
+                    depth_groups.append([])
+                depth_groups[-1].append(item)
+            if len(depth_groups) < 3:
+                return
+            traces = np.column_stack([
+                np.nanmean(sampled_data[:, [item.channel for item in group]], axis=1)
+                for group in depth_groups
+            ])
+            channels = list(range(len(depth_groups)))
+            depths = [-float(group[0].y) for group in depth_groups]
+            source_data = traces
+        else:
+            channels = [item.channel for item in ordered]
+            depths = _csd_depths(ordered)
+            source_data = sampled_data
         try:
-            csd = standard_1d_csd(sampled_data, channels, depths=depths)
+            csd = standard_1d_csd(source_data, channels, depths=depths)
         except ValueError:
             return
         if csd.size == 0:

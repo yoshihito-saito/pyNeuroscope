@@ -344,7 +344,7 @@ class MainWindow(QMainWindow):
         self.spectrogram_button.clicked.connect(self._show_spectrogram_window)
         self.csd_enabled = QPushButton("Current Source Density")
         self.csd_enabled.setCheckable(True)
-        self.csd_enabled.setToolTip("Overlay relative current source density on the recording traces")
+        self.csd_enabled.setToolTip("Overlay relative 1D CSD; NP2 contacts at the same depth are averaged per shank")
         self.csd_enabled.toggled.connect(self._refresh_viewer_layout)
         self.csd_cmap = QComboBox()
         self.csd_cmap.addItems(list(CSD_COLORMAPS))
@@ -1048,6 +1048,7 @@ class MainWindow(QMainWindow):
         self.display_mode.currentTextChanged.connect(self._view_mode_changed)
         self.view_mode = QComboBox()
         self.view_mode.addItems(["single_column", "group_columns"])
+        self.view_mode.setToolTip("Neuropixels 2.0 traces follow probe, shank, then base-to-tip site order.")
         self.view_mode.currentTextChanged.connect(self._view_mode_changed)
         self.signal_background = QComboBox()
         self.signal_background.addItems(["black", "white"])
@@ -3185,11 +3186,14 @@ class MainWindow(QMainWindow):
             column_headers.sort(key=lambda header: header[0])
         else:
             layout_groups = self._visible_groups()
+            if np2_shanks:
+                display_colors = self._physical_display_colors(channel_geometry, np2_shanks)
             layout = single_column_layout(
                 layout_groups,
                 self.bad_channels,
-                self.channel_colors,
+                display_colors,
                 channel_geometry=channel_geometry,
+                channel_shanks=np2_shanks,
             )
         self.viewer.set_display_mode(self.display_mode.currentText())
         overrides = {}
