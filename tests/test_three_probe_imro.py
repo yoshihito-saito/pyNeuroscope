@@ -1,4 +1,3 @@
-import json
 import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -10,6 +9,7 @@ from PySide6.QtWidgets import QApplication, QPushButton
 from pyneuroscope.color_map import palette_from_name
 from pyneuroscope.main_window import MainWindow
 from pyneuroscope.probe_geometry import load_recording_channel_map
+from pyneuroscope.probe_settings import read_probe_settings
 
 
 @pytest.fixture
@@ -34,12 +34,11 @@ def test_three_probes_imro_only_keep_all_dat_columns_and_scroll_to_last(app, tmp
         for i, path in enumerate(paths):
             if i:
                 w._add_probe()
-            w._probe_type_changed(i, "Neuropixels 2.0 four shank")
             monkeypatch.setattr(module.QFileDialog, "getOpenFileName", lambda *a, p=path: (str(p), ""))
-            w._load_probe_channel_map(i)
+            w._load_probe_file(i)
             assert w.probes[i].xml_path is None
             buttons = {b.text() for b in w.probe_rows_layout.itemAt(i).widget().findChildren(QPushButton)}
-            assert "Load IMRO" in buttons and "Probe XML" not in buttons
+            assert "Probe XML or IMRO" in buttons and "Load IMRO" not in buttons
         assert w.n_channels.value() == 1152
         assert [p.n_channels for p in w.probes] == [384, 384, 384]
         assert {ch for group in w.groups for ch in group.channels} == set(range(1152))
@@ -93,7 +92,8 @@ def test_three_probes_imro_only_keep_all_dat_columns_and_scroll_to_last(app, tmp
         monkeypatch.setattr(module.QFileDialog, "getSaveFileName", lambda *a: (str(saved), ""))
         monkeypatch.setattr(module.QMessageBox, "information", lambda *a: None)
         w._save_xml()
-        assert len(json.loads(saved.with_suffix(".probes.json").read_text())["probes"]) == 3
+        assert len(read_probe_settings(saved)["probes"]) == 3
+        assert not saved.with_suffix(".probes.json").exists()
         for path in paths:
             path.unlink()
         other = MainWindow()

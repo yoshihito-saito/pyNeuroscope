@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+from shutil import copy2
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -117,6 +118,11 @@ def test_np_manual_import_and_saved_settings_reusable_without_original_map(tmp_p
             w._save_probe_xml(0)
         else:
             w._save_xml()
+        assert not saved.with_suffix(".probes.json").exists()
+        standalone = tmp_path / "standalone"
+        standalone.mkdir()
+        copy2(saved, standalone / saved.name)
+        saved = standalone / saved.name
         expected_map = w.probes[0].channel_map
         raw_path.unlink()
         other = MainWindow()

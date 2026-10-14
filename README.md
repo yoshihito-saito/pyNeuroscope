@@ -82,23 +82,21 @@ probe type.
 
 ## Neuropixels maps
 
-Choose a Neuropixels probe type and set `nChannels` to the number of DAT columns
-for that probe. The full physical layout is bundled; selecting a type does not
-invent an active recording map. Load the recorded selection using each probe's
-`Load IMRO` (shown only for Neuropixels types). Probe XML is optional: type plus
-one IMRO per probe sets its 384 DAT channels and active-site geometry. The NP
-controls show IMRO loading instead of the individual probe XML buttons.
+Each probe's `Probe XML or IMRO` button accepts either a probe-local XML or
+an IMRO file. A standard IMRO header selects NP1, NP2 single shank, or NP2 four
+shank automatically and sets the 384 DAT channels and active-site geometry;
+no probe XML or prior type selection is required. The full physical layout is
+bundled. A manual type selection alone does not invent an active recording map.
 This does not configure the acquisition hardware.
 
-Each probe's `Load IMRO` also accepts `neuropixels_probeN_metadata.json`
+The same button also accepts `neuropixels_probeN_metadata.json`
 (WILDX applied probe receipt version 1), an `.imro` file, a probe-local
 `chanMap.mat`, Atlaxis `chanCoords.channelInfo.mat`, or an explicit JSON map.
-For NP1/NP2, prefer `.imro` (the file dialog's first filter). Select the probe
-type manually in the Recording tab: NP1, NP2 single shank, or NP2 four shank.
-Metadata JSON uses that selected geometry even if its model label differs or is
-missing. A recognized IMRO header must agree with the selected type; unknown
-headers use the selected type and must still match its row format/site limits.
-When no Neuropixels type is selected, the map's declared model is used.
+For NP1/NP2, prefer `.imro`. Recognized IMRO headers set the geometry even if a
+different type was selected previously. Custom headers can use a manually
+selected NP type and must still match its row format/site limits. Metadata JSON
+uses a manually selected geometry when its model label is generic or missing;
+otherwise the map's declared model is used.
 Neuropixels maps set the probe to 384 DAT columns; a different channel count
 clears that probe's incompatible XML groups.
 WILDX uses `configuration.channels[].output_channel` and `site`; disconnected
@@ -120,20 +118,23 @@ The first Ctrl+click starts a selection containing that channel.
 Double-click clears an active selection. With no selection, double-clicking a
 channel toggles its bad-channel status.
 
-Updating probe XML or saving session XML saves a `.probes.json` companion.
-It embeds the active channel-to-site/shank assignments and selected probe type;
-for recordings with the same DAT/channel assignment, the original IMRO or
-metadata JSON is no longer required when reopening the saved settings.
-Keep this file alongside its XML to restore probe
-types, maps, and probe colormaps. Adjacent Atlaxis `.chanCoords.channelInfo.mat`
-companions are also loaded. Rectangle selections are temporary and are not
+Updating probe XML or saving session XML embeds the probe count, types,
+colormaps, channel coordinates, physical site IDs, and active flags in a
+`pyneuroscope:probeSettings` section. Standard NeuroSuite recording fields,
+channel groups, and bad-channel flags remain in their usual locations. The XML
+alone can restore the settings for recordings with the same DAT/channel
+assignment; the original IMRO or metadata JSON is no longer required.
+Older `.probes.json` companions remain supported when the XML has no embedded
+settings. Embedded settings take precedence over an old companion. Adjacent
+Atlaxis `.chanCoords.channelInfo.mat` companions are also loaded.
+Rectangle selections are temporary and are not
 saved into XML channel groups or bad-channel flags. NP2's 200 µm
 tip-to-first-site offset follows Atlaxis and is provisional.
 
-For multiple probes, add one row per probe and load each probe-local XML with
-that row's `Probe XML` button. Each XML uses local channel IDs starting at zero;
-session XML uses combined DAT IDs. A session XML alone does not identify probe
-ownership: keep its `.probes.json` companion to restore multiple probes.
+For multiple probes, add one row per probe and load its XML or IMRO through
+`Probe XML or IMRO`. Probe XML uses local channel IDs starting at zero;
+session XML uses combined DAT IDs and stores each probe's channel range.
+Use `Load Session XML` to restore the saved probes together.
 Recording controls scroll vertically when the panel is too short.
 
 Waveform drawing uses peak-preserving display envelopes and cached Qt paths and

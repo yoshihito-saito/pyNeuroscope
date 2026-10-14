@@ -67,6 +67,7 @@ from .probe_geometry import (
     parse_recording_channel_map,
 )
 from .probe_viewer import ProbeViewer
+from .probe_settings import embed_probe_settings, read_probe_settings
 from .recording_overview import RecordingOverviewWidget
 from .signal_layout import group_column_layout, single_column_layout
 from .sleep_state_edit import append_theta_epochs, idx_to_intervals, states_to_episodes
@@ -417,11 +418,8 @@ class MainWindow(QMainWindow):
             title_row.addStretch(1)
             is_neuropixels = probe.probe_type in neuropixels_specs()
             if not is_neuropixels:
-                load_xml = QPushButton("Probe XML")
-                load_xml.clicked.connect(lambda checked=False, probe_index=index: self._load_probe_xml(probe_index))
                 update_xml = QPushButton("Update XML")
                 update_xml.clicked.connect(lambda checked=False, probe_index=index: self._save_probe_xml(probe_index))
-                title_row.addWidget(load_xml)
                 title_row.addWidget(update_xml)
             controls = QHBoxLayout()
             controls.setContentsMargins(0, 0, 0, 0)
@@ -470,11 +468,10 @@ class MainWindow(QMainWindow):
                 note.setWordWrap(True)
                 note.setToolTip(geometry.note)
                 row_layout.addWidget(note)
-            if is_neuropixels:
-                load_map = QPushButton("Load IMRO")
-                load_map.setToolTip("IMRO alone sets this probe's channels and geometry; no probe XML is required. Metadata JSON and MAT/JSON maps are also accepted.")
-                load_map.clicked.connect(lambda checked=False, probe_index=index: self._load_probe_channel_map(probe_index))
-                row_layout.addWidget(load_map)
+            load_probe = QPushButton("Probe XML or IMRO")
+            load_probe.setToolTip("Load probe XML or an IMRO file. Standard IMRO headers set the probe type and active channels automatically. Metadata JSON and MAT/JSON maps are also accepted.")
+            load_probe.clicked.connect(lambda checked=False, probe_index=index: self._load_probe_file(probe_index))
+            row_layout.addWidget(load_probe)
             if probe.xml_path is not None and not is_neuropixels:
                 loaded = QLabel(probe.xml_path.name)
                 loaded.setWordWrap(True)
@@ -525,7 +522,20 @@ class MainWindow(QMainWindow):
         self._refresh_probe_controls()
         self._refresh_viewer_layout()
 
-    def _load_probe_xml(self, probe_index: int) -> None:
+    def _load_probe_file(self, probe_index: int) -> None:
+        selected = Path(self.dat_path.text().strip()) if self.dat_path.text().strip() else None
+        start = str(selected if selected.is_dir() else selected.parent) if selected is not None else ""
+        path, _ = QFileDialog.getOpenFileName(
+            self, f"Probe XML or IMRO for Probe {probe_index + 1}", start,
+            "Probe XML or IMRO (*.xml *.imro);;Probe XML (*.xml);;IMRO (*.imro);;Neuropixels metadata (*.json);;Other channel maps (*.json *.mat);;All files (*)")
+        if not path:
+            return
+        if Path(path).suffix.lower() == ".xml":
+            self._load_probe_xml(probe_index, Path(path))
+        else:
+            self._load_probe_channel_map(probe_index, Path(path), infer_imro_type=True)
+
+    def _load_probe_xml(self, probe_index: int, xml_path: Path | None = None) -> None:
         if not (0 <= probe_index < len(self.probes)):
             return
         start = ""
@@ -535,17 +545,18 @@ class MainWindow(QMainWindow):
         elif self.dat_path.text().strip():
             selected = Path(self.dat_path.text().strip())
             start = str(selected if selected.is_dir() else selected.parent)
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            f"Load XML for Probe {probe_index + 1}",
-            start,
-            "XML files (*.xml);;All files (*)",
-        )
-        if not path:
-            return
-        xml_path = Path(path)
+        if xml_path is None:
+            path, _ = QFileDialog.getOpenFileName(
+                self, f"Load XML for Probe {probe_index + 1}", start,
+                "XML files (*.xml);;All files (*)")
+            if not path:
+                return
+            xml_path = Path(path)
         try:
             metadata, groups, bad = parse_neurosuite_xml(xml_path)
+            settings = read_probe_settings(xml_path)
+            if settings is not None and len(settings["probes"]) > 1:
+                raise XmlError("This XML contains multiple probes. Use Load Session XML to restore the session.")
         except XmlError as exc:
             QMessageBox.critical(self, "XML Error", str(exc))
             return
@@ -580,15 +591,28 @@ class MainWindow(QMainWindow):
             f"XML has no {', '.join(missing)}. Set the recording rates above, then Update XML or Save Session XML."
             if missing else "")
 
-    def _load_probe_channel_map(self, probe_index: int) -> None:
+    def _load_probe_channel_map(self, probe_index: int, path: Path | None = None, *, infer_imro_type: bool = False) -> None:
         selected = Path(self.dat_path.text().strip()) if self.dat_path.text().strip() else None
         start = str(selected if selected.is_dir() else selected.parent) if selected is not None else ""
-        path, _ = QFileDialog.getOpenFileName(self, f"Active channel map for Probe {probe_index + 1}", start,
-                                             "IMRO channel maps (*.imro);;Neuropixels metadata (*.json);;Other channel maps (*.json *.mat);;All files (*)")
+        if path is None:
+            selected_path, _ = QFileDialog.getOpenFileName(self, f"Active channel map for Probe {probe_index + 1}", start,
+                                                         "IMRO channel maps (*.imro);;Neuropixels metadata (*.json);;Other channel maps (*.json *.mat);;All files (*)")
+            path = Path(selected_path) if selected_path else None
         if path:
             try:
                 selected_type = self.probes[probe_index].probe_type
-                mapping = load_recording_channel_map(path, probe_type=selected_type if selected_type in neuropixels_specs() else None)
+                fallback_type = selected_type if selected_type in neuropixels_specs() else None
+                if infer_imro_type and path.suffix.lower() == ".imro":
+                    try:
+                        mapping = load_recording_channel_map(path)
+                    except ProbeGeometryError:
+                        if fallback_type is None:
+                            raise
+                        # Custom headers can use the manually selected type;
+                        # the parser still checks the header and every row.
+                        mapping = load_recording_channel_map(path, probe_type=fallback_type)
+                else:
+                    mapping = load_recording_channel_map(path, probe_type=fallback_type)
                 self._set_probe_channel_map(probe_index, mapping)
             except ProbeGeometryError as exc:
                 QMessageBox.critical(self, "Active channel map", str(exc))
@@ -659,19 +683,31 @@ class MainWindow(QMainWindow):
                 raise ProbeGeometryError("Map coordinates do not match this physical layout. Load Neuropixels metadata/IMRO matching DAT order, or matching probe-local coordinates.")
 
     def _load_probe_companion(self, index: int, xml_path: Path) -> None:
-        candidates = [xml_path.with_suffix(".probes.json"), xml_path.with_suffix(".channelmap.json"),
-                      xml_path.with_suffix(".chanCoords.channelInfo.mat")]
+        try:
+            embedded = read_probe_settings(xml_path)
+        except (XmlError, OSError) as exc:
+            self.statusBar().showMessage(f"Probe settings: {exc}", 8000)
+            return
+        candidates = [xml_path] if embedded is not None else [
+            xml_path.with_suffix(".probes.json"), xml_path.with_suffix(".channelmap.json"),
+            xml_path.with_suffix(".chanCoords.channelInfo.mat")]
         for path in candidates:
             if not path.exists():
                 continue
             try:
                 saved_color_mode = None
-                if path.suffix == ".json":
-                    raw = json.loads(path.read_text(encoding="utf-8"))
+                is_settings = embedded is not None or path.suffix == ".json"
+                if is_settings:
+                    raw = embedded if embedded is not None else json.loads(path.read_text(encoding="utf-8"))
                     if raw.get("format") == "pyneuroscope-probes":
                         if raw.get("version") != 1 or len(raw.get("probes", [])) != 1:
                             continue
                         saved_color_mode = raw.get("color_mode")
+                        saved_color_map = raw.get("color_map")
+                        if saved_color_map is not None:
+                            if saved_color_map not in COLOR_MAP_NAMES:
+                                raise ProbeGeometryError("Invalid saved colormap")
+                            self.color_map.setCurrentText(saved_color_map)
                         raw = raw["probes"][0]
                         if raw.get("n_channels") != self.probes[index].n_channels:
                             raise ProbeGeometryError("Probe settings channel count differs from the XML")
@@ -682,7 +718,7 @@ class MainWindow(QMainWindow):
                         if isinstance(saved_color_mode, str):
                             self.color_mode.setCurrentText(saved_color_mode)
                         break
-                mapping = parse_recording_channel_map(raw) if path.suffix == ".json" else load_recording_channel_map(path)
+                mapping = parse_recording_channel_map(raw) if is_settings else load_recording_channel_map(path)
                 self._set_probe_channel_map(index, mapping)
                 if isinstance(saved_color_mode, str):
                     self.color_mode.setCurrentText(saved_color_mode)
@@ -705,10 +741,10 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            Path(path).write_text(xml, encoding="utf-8")
             settings = dict(format="pyneuroscope-probes", version=1, color_mode=self.color_mode.currentText(),
+                            color_map=self.color_map.currentText(),
                             probes=[self._probe_settings(probe)])
-            Path(path).with_suffix(".probes.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
+            Path(path).write_text(embed_probe_settings(xml, settings), encoding="utf-8")
         except OSError as exc:
             QMessageBox.critical(self, "Update XML", str(exc))
             return
@@ -3161,23 +3197,28 @@ class MainWindow(QMainWindow):
         if not path:
             return
         save_path = Path(path)
-        save_path.write_text(xml, encoding="utf-8")
         settings = dict(format="pyneuroscope-probes", version=1, color_mode=self.color_mode.currentText(),
+                        color_map=self.color_map.currentText(),
                         probes=[self._probe_settings(probe) for probe in self.probes])
-        save_path.with_suffix(".probes.json").write_text(json.dumps(settings, indent=2), encoding="utf-8")
+        save_path.write_text(embed_probe_settings(xml, settings), encoding="utf-8")
         self.xml_settings_note.clear()
         QMessageBox.information(self, "Saved", f"Saved XML to {path}")
 
     def _restore_probe_settings(self, xml_path: Path) -> bool:
         path = xml_path.with_suffix(".probes.json")
-        if not path.exists():
-            return False
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw = read_probe_settings(xml_path)
+            if raw is None:
+                if not path.exists():
+                    return False
+                raw = json.loads(path.read_text(encoding="utf-8"))
             if raw.get("format") != "pyneuroscope-probes" or raw.get("version") != 1:
                 raise ProbeGeometryError("Unsupported probe settings sidecar")
             if sum(p["n_channels"] for p in raw["probes"]) != self.n_channels.value():
                 raise ProbeGeometryError("Probe settings channel count differs from the XML")
+            saved_color_map = raw.get("color_map")
+            if saved_color_map is not None and saved_color_map not in COLOR_MAP_NAMES:
+                raise ProbeGeometryError("Invalid saved colormap")
             probes, offset = [], 0
             for entry in raw["probes"]:
                 count = entry["n_channels"]
@@ -3193,6 +3234,8 @@ class MainWindow(QMainWindow):
                     self._validate_probe_mapping(probes[-1], probes[-1].channel_map)
                 offset += count
             self.probes = probes
+            if saved_color_map is not None:
+                self.color_map.setCurrentText(saved_color_map)
             self.color_mode.setCurrentText(raw.get("color_mode", "all"))
             return True
         except (OSError, ValueError, TypeError, KeyError, ProbeGeometryError) as exc:

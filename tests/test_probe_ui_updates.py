@@ -211,22 +211,21 @@ def test_bitmap_physical_geometry_shows_active_white_and_inactive_gray(app):
         v.close()
 
 
-def test_active_map_button_only_for_neuropixels_and_navigation_removed(app, monkeypatch):
+def test_probe_xml_or_imro_button_available_for_all_probe_types(app, monkeypatch):
     w = MainWindow()
     try:
         from pyneuroscope.probe_geometry import neuropixels_specs
         calls = []
-        monkeypatch.setattr(w, "_load_probe_channel_map", calls.append)
+        monkeypatch.setattr(w, "_load_probe_file", calls.append)
         for probe_type in ["", "linear", *neuropixels_specs()]:
             w._probe_type_changed(0, probe_type)
             row = w.probe_rows_layout.itemAt(0).widget()
             buttons = {b.text(): b for b in row.findChildren(QPushButton)}
             assert ("Update XML" in buttons) == (probe_type not in neuropixels_specs())
-            assert ("Probe XML" in buttons) == (probe_type not in neuropixels_specs())
-            assert ("Load IMRO" in buttons) == (probe_type in neuropixels_specs())
-            if probe_type in neuropixels_specs():
-                buttons["Load IMRO"].click()
-                assert calls[-1] == 0
+            assert "Probe XML or IMRO" in buttons
+            assert "Load IMRO" not in buttons and "Probe XML" not in buttons
+            buttons["Probe XML or IMRO"].click()
+            assert calls[-1] == 0
         right_buttons = [b.text() for b in w.color_mode.parentWidget().findChildren(QPushButton)]
         assert "Show all channels" not in right_buttons and "Fit probe" not in right_buttons
     finally:

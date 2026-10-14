@@ -111,7 +111,7 @@ def test_xml_without_rates_keeps_gui_and_updates_probe_file(app, tmp_path, monke
     assert metadata.lfp_sampling_rate == 2500
     assert metadata.amplification is None
     assert groups[0].channels == [3,2,1,0]
-    # A settings sidecar with no map must not hide every recording channel.
+    # Embedded settings with no map must not hide every recording channel.
     monkeypatch.setattr(module.QFileDialog, 'getOpenFileName', lambda *a: (str(output), ''))
     w._load_probe_xml(0)
     assert [ch for g in w._visible_groups() for ch in g.channels] == [3,2,1,0]
