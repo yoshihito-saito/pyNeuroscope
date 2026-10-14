@@ -51,11 +51,26 @@ def single_column_layout(
     *,
     default_color: str = "#1f77b4",
     channel_geometry: dict[int, ProbeSitePosition] | None = None,
+    channel_shanks: dict[int, tuple[int, int]] | None = None,
 ) -> list[TraceLayoutItem]:
-    _ = channel_geometry
     items: list[TraceLayoutItem] = []
+    positions = channel_geometry or {}
+    shanks = channel_shanks or {}
     for group_index, group in enumerate(groups):
-        for channel in group.channels:
+        channels = group.channels
+        if shanks:
+            # Show mapped NP2 contacts by probe and shank, from base (+y) to tip.
+            # Channels without an NP2 site retain their XML order after them.
+            original_order = {channel: index for index, channel in enumerate(channels)}
+            channels = sorted(
+                channels,
+                key=lambda channel: (
+                    (0, *shanks[channel], -positions[channel].y, positions[channel].x, channel)
+                    if channel in shanks and channel in positions
+                    else (1, 0, 0, original_order[channel], 0, channel)
+                ),
+            )
+        for channel in channels:
             items.append(
                 TraceLayoutItem(
                     channel=channel,
